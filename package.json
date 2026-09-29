@@ -1,6 +1,6 @@
 {
   "name": "pi-robot-hand",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension: the agent hands the user a command, and after the user agrees it lands in the pi prompt or the clipboard, never run by the agent",
   "type": "module",
   "license": "MIT",
