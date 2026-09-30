@@ -44,6 +44,12 @@ pi install npm:pi-robot-hand
 
 When the prompt already holds a draft, the prompt option says it replaces the draft. The clipboard option appears only for shell commands in the terminal UI. RPC clients get the prompt option; modes without a UI make the tool fail so the agent shows the command in chat.
 
+## With CC Safety Net
+
+CC Safety Net 2.4.7 scans tool input for sensitive paths, so it may block `robot_hand` when the *text* of a command names one. `robot_hand` only displays the command; the user decides whether to run it.
+
+Use a CC Safety Net build containing the Pi `robot_hand` display-only exemption (the local `fix/pi-allow-display-only-tools` branch; **not** the published 2.4.7 release). It applies only to the exact Pi tool name `robot_hand`; `bash` and other tools stay protected. To check it, ask the agent to hand over a harmless command containing a dummy sensitive-path name, such as `.env.agent-8091`: the selector should open without a CC Safety Net block. Do not press Enter to run a command you do not want to execute.
+
 ## Development
 
 ```bash
