@@ -161,11 +161,9 @@ Writes are atomic (temp file + rename) and verified by re-reading the destinatio
 - Values shorter than 4 characters are not redacted. Values applied with `format: "command"` are redacted for the rest of the session only.
 - The apply command is shown before it runs; review it, since a `command` can send the staged value anywhere.
 
-## `robot_hand` and CC Safety Net
+## Other safety extensions
 
-CC Safety Net 2.4.7 scans tool input for sensitive paths, so it may block `robot_hand` when the *text* of a command names one. `robot_hand` only displays the command; the user decides whether to run it.
-
-Use a CC Safety Net build containing the Pi `robot_hand` display-only exemption (the local `fix/pi-allow-display-only-tools` branch; **not** the published 2.4.7 release). It applies only to the exact Pi tool name `robot_hand`; `bash` and other tools stay protected. To check it, ask the agent to hand over a harmless command containing a dummy sensitive-path name, such as `.env.agent-8091`: the selector should open without a CC Safety Net block. Do not press Enter to run a command you do not want to execute.
+pi-robot-hand depends on no other extension and runs alongside command guards such as cc-safety-net. A guard that scans every tool call's input may block `robot_hand` when the text of a command names a sensitive path such as `.env`, even though `robot_hand` only displays it. When that happens, the agent writes the command in chat and you run it yourself.
 
 ## Development
 
