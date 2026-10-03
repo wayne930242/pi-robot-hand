@@ -13,12 +13,14 @@ pi-robot-hand hands them to you in one keystroke and brings the result back to t
 pi install npm:pi-robot-hand
 ```
 
+Also on the [pi package gallery](https://pi.dev/packages/pi-robot-hand).
+
 ## `robot_hand`
 
 The agent calls `robot_hand` with a command and a one-line reason, and pi shows a selector:
 
 ```
- Robot Hand — 需要 sudo 重啟服務
+ Robot Hand — Restarting nginx needs sudo
 
    ! sudo systemctl restart nginx
 
