@@ -1,7 +1,7 @@
 {
   "name": "pi-robot-hand",
-  "version": "0.1.1",
-  "description": "Pi extension: the agent hands the user a command, and after the user agrees it lands in the pi prompt or the clipboard, never run by the agent",
+  "version": "0.2.0",
+  "description": "The lazy kit for pi: no IDE, no copy-paste, safety net still on. The agent hands you commands (prompt, clipboard, or a Herdr pane that reports back), answers your ! commands, and takes secrets through a masked dialog it never sees",
   "type": "module",
   "license": "MIT",
   "author": "wayne930242",
@@ -17,21 +17,34 @@
     "extension",
     "clipboard",
     "command",
-    "approval"
+    "approval",
+    "herdr",
+    "secret",
+    "dotenv"
   ],
   "files": [
     "src",
+    "lib",
+    "dist",
+    "skills",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/index.ts",
+      "./src/follow-up.ts",
+      "./src/secret-drop/index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
-    "test": "node --test tests/*.test.ts"
+    "test": "npm run build && node --test tests/*.test.ts",
+    "prepack": "npm run build"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

@@ -1,7 +1,17 @@
 /** What the agent hands over, and how each of the user's choices turns into editor or clipboard text. */
 
 export type Kind = "shell" | "pi";
-export type Choice = "prompt" | "clipboard" | "cancel";
+export type Preferred = "prompt" | "clipboard" | "herdr-type" | "herdr-run";
+export type Choice = Preferred | "cancel";
+
+/** Where the hand-over can go in this session. */
+export interface Reach {
+	hasDraft: boolean;
+	/** The local terminal UI, where the clipboard works. */
+	canCopy: boolean;
+	/** pi runs inside a Herdr pane, so a sibling pane can be opened. */
+	inHerdr: boolean;
+}
 
 export interface Offer {
 	command: string;
@@ -32,15 +42,30 @@ export function promptText(offer: Offer): string {
 	return offer.kind === "shell" ? `! ${offer.command}` : offer.command;
 }
 
+// When the preferred choice is unavailable, the next one in its chain leads instead.
+const FALLBACK: Record<Preferred, Preferred[]> = {
+	prompt: ["prompt"],
+	clipboard: ["clipboard", "prompt"],
+	"herdr-type": ["herdr-type", "clipboard", "prompt"],
+	"herdr-run": ["herdr-run", "herdr-type", "clipboard", "prompt"],
+};
+
 /**
- * The choices shown to the user. The clipboard needs the local terminal and only makes sense for a
- * shell command run elsewhere; a pi command only runs inside pi.
+ * The choices shown to the user, the preferred one first so the cursor starts on it. The clipboard
+ * needs the local terminal and Herdr panes need pi inside Herdr; both only make sense for a shell
+ * command, since a pi command only runs inside pi.
  */
-export function options(offer: Offer, hasDraft: boolean, canCopy: boolean): Option[] {
-	const list: Option[] = [{ choice: "prompt", label: hasDraft ? "Put it in my prompt (replaces my draft)" : "Put it in my prompt" }];
-	if (canCopy && offer.kind === "shell") list.push({ choice: "clipboard", label: "Copy it to the clipboard" });
-	list.push({ choice: "cancel", label: "No, thanks" });
-	return list;
+export function options(offer: Offer, reach: Reach, preferred: Preferred = "prompt"): Option[] {
+	const shell = offer.kind === "shell";
+	const list: Option[] = [{ choice: "prompt", label: reach.hasDraft ? "Put it in my prompt (replaces my draft)" : "Put it in my prompt" }];
+	if (shell && reach.canCopy) list.push({ choice: "clipboard", label: "Copy it to the clipboard" });
+	if (shell && reach.inHerdr) {
+		list.push({ choice: "herdr-type", label: "Type it into a new Herdr pane (I press Enter)" });
+		list.push({ choice: "herdr-run", label: "Run it in a new Herdr pane" });
+	}
+	const lead = FALLBACK[preferred].find((choice) => list.some((option) => option.choice === choice)) ?? "prompt";
+	const ordered = [...list.filter((option) => option.choice === lead), ...list.filter((option) => option.choice !== lead)];
+	return [...ordered, { choice: "cancel", label: "No, thanks" }];
 }
 
 /** The selector title: why the agent hands this over, then exactly what the user would run. */
@@ -51,11 +76,15 @@ export function dialogTitle(offer: Offer, reason: string): string {
 /** What the tool tells the agent after the user chose. */
 export function resultText(choice: Choice, offer: Offer): string {
 	if (choice === "prompt") {
-		const output = offer.kind === "shell" ? " Its output appears in the conversation when they run it." : "";
+		const output = offer.kind === "shell" ? " When they run it, its output returns to the conversation and starts your next turn." : "";
 		return `The user put \`${promptText(offer)}\` in their prompt; it runs only when they press Enter.${output} Nothing has run yet; wait for the user.`;
 	}
 	if (choice === "clipboard") {
 		return "The user copied the command to their clipboard to run it themselves. Nothing has run yet; wait for the user to report the result.";
+	}
+	if (choice === "herdr-type" || choice === "herdr-run") {
+		const state = choice === "herdr-run" ? "It is running there" : "It runs when the user presses Enter there";
+		return `The command is in a new Herdr pane. ${state}; when it finishes, the pane closes and its output arrives as a new message. Wait for that message.`;
 	}
 	return "The user declined; nothing was placed or run. Ask how they want to proceed.";
 }
