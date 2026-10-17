@@ -68,6 +68,20 @@ export function options(offer: Offer, reach: Reach, preferred: Preferred = "prom
 	return [...ordered, { choice: "cancel", label: "No, thanks" }];
 }
 
+// Where each choice acts, for an answerer that shows the choices elsewhere. The clipboard is this computer's.
+const NOTES: Record<Choice, string | undefined> = {
+	prompt: "Lands in the terminal's prompt; press Enter there",
+	clipboard: "Copies on this computer",
+	"herdr-type": "Opens a pane with the command typed; press Enter there",
+	"herdr-run": "Runs it at once in a new pane",
+	cancel: undefined,
+};
+
+/** The choices as published on the dialog bus, each with its note. */
+export function busChoices(list: Option[]): { label: string; note?: string; localOnly?: true }[] {
+	return list.map(({ choice, label }) => ({ label, ...(NOTES[choice] ? { note: NOTES[choice] } : {}), ...(choice === "clipboard" ? { localOnly: true as const } : {}) }));
+}
+
 /** The selector title: why the agent hands this over, then exactly what the user would run. */
 export function dialogTitle(offer: Offer, reason: string): string {
 	return `Robot Hand — ${reason}\n\n  ${promptText(offer).split("\n").join("\n  ")}`;

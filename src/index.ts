@@ -10,12 +10,15 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { copyToClipboard, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type Choice, dialogTitle, options, promptText, resultText, toOffer } from "./hand.ts";
+import { openDialog } from "./dialog.ts";
+import { busChoices, type Choice, dialogTitle, options, promptText, resultText, toOffer } from "./hand.ts";
 import { checkRun, cleanup, type Exec, findShell, type HerdrRun, outcomeText, startRun } from "./herdr.ts";
 
 interface HandDetails {
 	command: string;
 	status: "waiting" | Choice;
+	/** Present when another extension answered the selector. */
+	answeredFrom?: "browser";
 }
 
 export const HERDR_RESULT_TYPE = "robot-hand-herdr";
@@ -103,7 +106,7 @@ export function createRobotHand(copy: (text: string) => Promise<void> = copyToCl
 			parameters: Params,
 			executionMode: "sequential",
 
-			async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			async execute(toolCallId, params, signal, onUpdate, ctx) {
 				if (!ctx.hasUI) {
 					throw new Error("robot_hand needs an interactive pi UI; show the command to the user in chat instead.");
 				}
@@ -117,37 +120,49 @@ export function createRobotHand(copy: (text: string) => Promise<void> = copyToCl
 				};
 				const choices = options(offer, reach, params.default);
 
-				onUpdate?.({ content: [{ type: "text", text: "Waiting for the user to take the command..." }], details: { command: text, status: "waiting" } });
-				pi.events.emit("herdr:blocked", { active: true, label: "Waiting for the user to take a command" });
-				let picked: string | undefined;
+				const title = dialogTitle(offer, params.reason);
+				const dialog = openDialog(pi.events, { toolCallId, title, choices: busChoices(choices), copy: offer.command, signal });
 				try {
-					picked = await ctx.ui.select(
-						dialogTitle(offer, params.reason),
-						choices.map((option) => option.label),
-						{ signal },
-					);
-				} finally {
-					pi.events.emit("herdr:blocked", { active: false });
-				}
-				const choice = choices.find((option) => option.label === picked)?.choice ?? "cancel";
+					onUpdate?.({ content: [{ type: "text", text: "Waiting for the user to take the command..." }], details: { command: text, status: "waiting" } });
+					pi.events.emit("herdr:blocked", { active: true, label: "Waiting for the user to take a command" });
+					let won: number | undefined;
+					try {
+						let picked: string | undefined;
+						if (dialog.open) {
+							picked = await ctx.ui.select(
+								title,
+								choices.map((option) => option.label),
+								{ signal: dialog.signal },
+							);
+						}
+						// Settle right after the selector resolves, before anything else can run.
+						const at = choices.findIndex((option) => option.label === picked);
+						won = dialog.finish(at < 0 ? undefined : at);
+					} finally {
+						pi.events.emit("herdr:blocked", { active: false });
+					}
+					const choice = (won === undefined ? undefined : choices[won]?.choice) ?? "cancel";
 
-				if (choice === "prompt") {
-					ctx.ui.setEditorText(text);
-					ctx.ui.notify("Review the command in your prompt and press Enter to run it.", "info");
-				} else if (choice === "clipboard") {
-					await copy(offer.command);
-					ctx.ui.notify("Command copied to the clipboard.", "info");
-				} else if ((choice === "herdr-type" || choice === "herdr-run") && piPane) {
-					const run = await startRun(exec, { piPane, cwd: ctx.cwd, tmp, command: offer.command, type: choice === "herdr-type", shell: findShell(env.PATH) });
-					runs.set(run.token, { run, ticks: 0, busy: false });
-					timer ??= setInterval(watch, WATCH_MS);
+					if (choice === "prompt") {
+						ctx.ui.setEditorText(text);
+						ctx.ui.notify("Review the command in your prompt and press Enter to run it.", "info");
+					} else if (choice === "clipboard") {
+						await copy(offer.command);
+						ctx.ui.notify("Command copied to the clipboard.", "info");
+					} else if ((choice === "herdr-type" || choice === "herdr-run") && piPane) {
+						const run = await startRun(exec, { piPane, cwd: ctx.cwd, tmp, command: offer.command, type: choice === "herdr-type", shell: findShell(env.PATH) });
+						runs.set(run.token, { run, ticks: 0, busy: false });
+						timer ??= setInterval(watch, WATCH_MS);
+					}
+					return {
+						content: [{ type: "text", text: resultText(choice, offer) }],
+						details: { command: text, status: choice, ...(dialog.remote ? { answeredFrom: "browser" } : {}) } satisfies HandDetails,
+						// The next move is the user's; a follow-up from the agent would only talk over it.
+						terminate: choice !== "cancel",
+					};
+				} finally {
+					dialog.dispose();
 				}
-				return {
-					content: [{ type: "text", text: resultText(choice, offer) }],
-					details: { command: text, status: choice } satisfies HandDetails,
-					// The next move is the user's; a follow-up from the agent would only talk over it.
-					terminate: choice !== "cancel",
-				};
 			},
 
 			renderCall(args, theme) {

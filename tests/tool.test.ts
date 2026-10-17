@@ -29,7 +29,8 @@ async function run(
 		registerTool: (definition: ToolDefinition) => {
 			tool = definition;
 		},
-		events: { emit: (_channel: string, data: unknown) => harness.events.push(data) },
+		// harness.events keeps the herdr:blocked events; the dialog contract has its own tests.
+		events: { emit: (channel: string, data: unknown) => channel === "herdr:blocked" && harness.events.push(data), on: () => () => {} },
 		on: () => {},
 		exec: async (_bin: string, args: string[]) => {
 			harness.herdr.push(args);

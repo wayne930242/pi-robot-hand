@@ -60,6 +60,25 @@ It can set a `.env` key, replace a regex match, write a whole file, or feed the 
 `/secret-drop` lists protected files.
 See [docs/secret-drop.md](https://github.com/wayne930242/pi-robot-hand/blob/main/docs/secret-drop.md) for parameters, protection details, and limits.
 
+## Answering from another extension
+
+`robot_hand` publishes the selector it opens on pi's in-process event bus, so another extension (a browser page, a remote UI) can answer it. The terminal selector works as before whether or not anyone listens, and an answer runs exactly as if you had picked it there.
+
+The contract is "dialog contract v1", shared by every extension that owns a dialog; only the event prefix differs. For `robot_hand` the prefix is `robot-hand`. Every payload carries `version: 1`.
+
+| Event | Direction | Payload |
+|---|---|---|
+| `robot-hand:pending` | owner → bus | `{ version, id, toolCallId, digest, select: { title, choices: [{ label, note?, localOnly? }], copy } }`. `id` is a random UUID for this dialog. `note` says where a choice acts; `localOnly` marks the clipboard, which is this computer's. `copy` is the command, for a page that offers a copy button. |
+| `robot-hand:answer` | bus → owner | `{ version, id, answerId, digest, selections: [index] }`. `answerId` is `[A-Za-z0-9_-]{16,64}`, minted by the answerer; `digest` is the one from `pending`; `selections` holds exactly one zero-based index into `choices`. No other keys. |
+| `robot-hand:answer-result` | owner → bus | `{ version, id, answerId, accepted, reason? }`, emitted synchronously inside the `answer` listener. `reason` is `closed`, `digest`, `malformed`, or `not-allowed`. An answer for an unknown `id` gets no result. |
+| `robot-hand:closed` | owner → bus | `{ version, id, by, answerId? }`, once per dialog: `by` is `local` (picked in the terminal), `remote` (with the `answerId`), `cancel` (Escape), `abort` (the agent's turn was aborted), or `error`. |
+
+The digest is the lowercase hex SHA-256 of `JSON.stringify(["pi-dialog/1", "select", title, labels])`, where `labels` are the choice labels in order. It binds an answer to what the user saw. For the title `Robot Hand — Deploy needs your sudo password\n\n  ! npm run deploy` and the labels `Type it into a new Herdr pane (I press Enter)`, `Put it in my prompt`, `No, thanks`, the digest is `2974924308b3389b43761124fc7cbc4a4feced24e7f83706ae3f568a21b45faf`.
+
+An answer for this dialog's `id` is refused whole unless its `version`, `answerId`, `digest`, and `selections` are right and it has no extra keys; an `answerId` that fails the pattern comes back as an empty string in the result. The first of a terminal pick, a valid answer, Escape, or an abort wins: a later answer gets `accepted: false, reason: "closed"`, and an answer sent while `pending` is being emitted wins before the selector opens. A remote answer closes the terminal selector; the tool result is the same text as a terminal pick, with `details.answeredFrom: "browser"`.
+
+Any extension in the pi process can read dialog ids from the bus and answer. That adds no authority: such an extension could already run commands itself, so there is no opt-in setting. `secret_drop` never publishes anything and can only be answered in the terminal.
+
 ## Safety
 
 pi-robot-hand depends on no other extension.
