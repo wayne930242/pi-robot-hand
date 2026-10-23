@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - `secret_drop` guidance: when a secret is created or revealed on a web page and the agent can drive the user's signed-in browser, the agent first asks whether to prepare that page up to its final create or reveal button, so the user only presses it and copies the value. The agent leaves that tab unread until the value is applied.
 
