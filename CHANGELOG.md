@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- Tighter browser preparation for `secret_drop`: only pages that newly create a secret are prepared, and only in a browser session already open on the user's signed-in profile. After preparing, the agent makes no browser call in that session until the user says the tab is closed, whatever `secret_drop` returns, because browser tools return page content. Pages that show an existing secret are never opened by the agent, since the value is already in their DOM. A token created on a prepared page and not applied is revoked.
+
 ## 0.3.1
 
 - `secret_drop` guidance: when a secret is created or revealed on a web page and the agent can drive the user's signed-in browser, the agent first asks whether to prepare that page up to its final create or reveal button, so the user only presses it and copies the value. The agent leaves that tab unread until the value is applied.
