@@ -197,6 +197,7 @@ export default function secretDrop(pi: ExtensionAPI) {
 			"Use secret_drop whenever a password, token, key, or other credential must land in a file or be fed to a command; never ask the user to paste secrets into chat.",
 			"Files that hold secrets are consumed by programs, never read or printed by the agent.",
 			"Give secret_drop instructions the user can follow without asking: the exact page or menu, every field to fill in, and what to copy; write them and the label in the user's language.",
+			"When the secret is created or revealed on a web page and you can drive the user's signed-in browser, first ask whether to prepare that page up to its final create or reveal button, so the user only presses it and copies the value; after that press, leave the tab unread until the value is applied.",
 			"When secret_drop returns a question from the user, answer it, then call secret_drop again.",
 		],
 		parameters: Params,

@@ -10,7 +10,8 @@ Secrets reach files and commands through the `secret_drop` tool, so the value ne
 ## Writing a secret
 
 1. Pick the destination the consuming program expects. For a `regex` placement in a file that is not yet protected, read its structure first.
-2. Call `secret_drop` with a `label` naming exactly what to enter (service, account, environment), `instructions` the user can follow without asking (the exact page or menu path, every field to fill in such as name, scope, permissions, and expiration, and what to copy), the page as `url` when there is one, both in the user's language, and one format:
+2. When the value is created or revealed on a web page and you can drive the user's own browser, where they are signed in, first ask the user whether you should prepare that page. When they agree, open it, fill in every field (name, scope, permissions, expiration), and stop at the button that creates or reveals the value; your `instructions` then say which button to press in which tab and what to copy. Once that button is pressed the value is on screen, so leave the tab alone (no snapshot, screenshot, or page text) until `secret_drop` reports the value applied, then close it. When the user declines or no browser is available, write the full steps for them to follow.
+3. Call `secret_drop` with a `label` naming exactly what to enter (service, account, environment), `instructions` the user can follow without asking (the exact page or menu path, every field to fill in such as name, scope, permissions, and expiration, and what to copy), the page as `url` when there is one, both in the user's language, and one format:
    - `key` + `destination` (format `env`): sets `KEY=value`, replacing existing `KEY` / `export KEY` lines or appending one. Other lines and trailing comments stay. For a file read by `docker --env-file`, pass `quote: "none"`, since Docker keeps quotes as part of the value.
    - `format: "regex"` + `destination` + `regex`: replaces capture group 1, or the whole match, in an existing file. Make the group cover only the value, e.g. `password: "([^"]*)"`.
    - `format: "file"` + `destination`: the whole file is the secret, for key files and single-value files. An existing destination is refused unless `overwrite: true` is passed; pass it only to rotate a single-value file, never for a multi-value file such as `.env`.
@@ -18,7 +19,7 @@ Secrets reach files and commands through the `secret_drop` tool, so the value ne
      - `ansible-vault encrypt_string --vault-password-file .vault-pass --stdin-name db_password < {secret} >> group_vars/prod/vault.yml`
      - `gh secret set DEPLOY_TOKEN < {secret}`
      - `kubectl create secret generic app-tls --from-file=tls.key={secret}`
-3. Call it once per secret and wait for the result:
+4. Call it once per secret and wait for the result:
    - **Applied**: the report states the change and `length check passed (N chars)`. That report is the verification; the value is in place.
    - **Question**: the user pressed Tab and asked instead; nothing was staged. Answer it, then call `secret_drop` again.
    - **Cancelled or aborted**: nothing was applied. Ask the user how to proceed.
