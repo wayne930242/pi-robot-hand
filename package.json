@@ -43,7 +43,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
-    "test": "npm run build && node --test tests/*.test.ts",
+    "test": "npm run build && node --test --test-force-exit tests/*.test.ts",
     "prepack": "npm run build"
   },
   "peerDependencies": {
