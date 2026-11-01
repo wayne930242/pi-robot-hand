@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - The two Herdr pane choices now carry `next: "pane"` and `tagged: true` in `robot-hand:pending`, and "Put it in my prompt" carries `next: "terminal"` (hints, not hashed). When another extension's answer picks a pane choice, the new pane is marked with `herdr pane report-metadata <pane_id> --source robot-hand --token sb_answer=<answerId> --ttl-ms 600000` right after the split and before the command is typed or run, so Straw Boss grants its terminal keys to that pane and no other. Tagging is tried once; a failure does not stop the command. A pick in the terminal tags nothing.
 
