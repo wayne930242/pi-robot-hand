@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The two Herdr pane choices now carry `next: "pane"` and `tagged: true` in `robot-hand:pending`, and "Put it in my prompt" carries `next: "terminal"` (hints, not hashed). When another extension's answer picks a pane choice, the new pane is marked with `herdr pane report-metadata <pane_id> --source robot-hand --token sb_answer=<answerId> --ttl-ms 600000` right after the split and before the command is typed or run, so Straw Boss grants its terminal keys to that pane and no other. Tagging is tried once; a failure does not stop the command. A pick in the terminal tags nothing.
+
 ## 0.3.2
 
 - Tighter browser preparation for `secret_drop`: only pages that newly create a secret are prepared, and only in a browser session already open on the user's signed-in profile. After preparing, the agent makes no browser call in that session until the user says the tab is closed, whatever `secret_drop` returns, because browser tools return page content. Pages that show an existing secret are never opened by the agent, since the value is already in their DOM. A token created on a prepared page and not applied is revoked.

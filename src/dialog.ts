@@ -7,7 +7,9 @@ export interface Bus {
 	emit(channel: string, data: unknown): void;
 	on(channel: string, handler: (data: unknown) => void): () => void;
 }
-export interface BusChoice { label: string; note?: string; localOnly?: true }
+// `next` and `tagged` are hints, not hashed: `next` says which terminal opens once the choice is accepted, `tagged` that the
+// owner marks the pane it opened with the answer's own `answerId` (token `sb_answer`).
+export interface BusChoice { label: string; note?: string; localOnly?: true; next?: "terminal" | "pane"; tagged?: true }
 type By = "local" | "remote" | "cancel" | "timeout" | "abort" | "error";
 type Reason = "closed" | "digest" | "malformed" | "not-allowed";
 const PREFIX = "robot-hand";
@@ -42,6 +44,7 @@ export function openDialog(bus: Bus, o: { toolCallId: string; title: string; cho
 	const local = new AbortController();
 	let by: By | undefined;
 	let winner: number | undefined;
+	let winnerAnswerId: string | undefined;
 	// The flag is written before anything is closed or emitted, so the other claimant sees "closed".
 	const settle = (how: By, answerId?: string, between?: () => void): void => {
 		if (by) return;
@@ -60,6 +63,7 @@ export function openDialog(bus: Bus, o: { toolCallId: string; title: string; cho
 		if (typeof verdict === "string") return result(false, verdict);
 		settle("remote", answerId, () => {
 			winner = verdict;
+			winnerAnswerId = answerId;
 			local.abort();
 			result(true);
 		});
@@ -74,6 +78,8 @@ export function openDialog(bus: Bus, o: { toolCallId: string; title: string; cho
 		signal: AbortSignal.any(o.signal ? [o.signal, local.signal] : [local.signal]),
 		get open() { return by === undefined; },
 		get remote() { return by === "remote"; },
+		// The accepted answer's id, once a remote answer has won.
+		get answerId() { return by === "remote" ? winnerAnswerId : undefined; },
 		finish(picked: number | undefined): number | undefined {
 			settle(picked === undefined ? "cancel" : "local");
 			return by === "local" ? picked : winner;

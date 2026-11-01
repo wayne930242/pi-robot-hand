@@ -107,3 +107,23 @@ test("the result message tells the agent what ran and what to do next", () => {
 	assert.match(outcomeText({ kind: "cancelled" }, "make"), /nothing ran/);
 	assert.match(outcomeText({ kind: "closed" }, "make"), /unknown/);
 });
+
+test("a tagged run reports the answer's id on the new pane between the split and the focus", async () => {
+	const tmp = mkdtempSync(join(tmpdir(), "robot-hand-test-"));
+	const { calls, exec } = fakeHerdr({ split: { stdout: JSON.stringify({ result: { pane: { pane_id: "w1:p9" } } }), code: 0 } });
+	await startRun(exec, { piPane: "w1:p2", cwd: "/repo", tmp, command: "ls", type: false, shell: "bash", answerId: "answer-id-0123456789" });
+	assert.deepEqual(calls.map((args) => args[1]), ["split", "report-metadata", "focus", "run"]);
+	assert.deepEqual(calls[1], ["pane", "report-metadata", "w1:p9", "--source", "robot-hand", "--token", "sb_answer=answer-id-0123456789", "--ttl-ms", "600000"]);
+});
+
+test("a run without an answer id is not tagged, and a failed tag does not stop it", async () => {
+	const tmp = mkdtempSync(join(tmpdir(), "robot-hand-test-"));
+	const split = { stdout: JSON.stringify({ result: { pane: { pane_id: "w1:p9" } } }), code: 0 };
+	let herdr = fakeHerdr({ split });
+	await startRun(herdr.exec, { piPane: "w1:p2", cwd: "/repo", tmp, command: "ls", type: false, shell: "bash" });
+	assert.deepEqual(herdr.calls.map((args) => args[1]), ["split", "focus", "run"]);
+
+	herdr = fakeHerdr({ split, "report-metadata": { stdout: "", code: 1 } });
+	await startRun(herdr.exec, { piPane: "w1:p2", cwd: "/repo", tmp, command: "ls", type: false, shell: "bash", answerId: "answer-id-0123456789" });
+	assert.deepEqual(herdr.calls.map((args) => args[1]), ["split", "report-metadata", "focus", "run"]);
+});

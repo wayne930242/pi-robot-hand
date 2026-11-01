@@ -1,5 +1,7 @@
 /** What the agent hands over, and how each of the user's choices turns into editor or clipboard text. */
 
+import type { BusChoice } from "./dialog.ts";
+
 export type Kind = "shell" | "pi";
 export type Preferred = "prompt" | "clipboard" | "herdr-type" | "herdr-run";
 export type Choice = Preferred | "cancel";
@@ -77,9 +79,18 @@ const NOTES: Record<Choice, string | undefined> = {
 	cancel: undefined,
 };
 
-/** The choices as published on the dialog bus, each with its note. */
-export function busChoices(list: Option[]): { label: string; note?: string; localOnly?: true }[] {
-	return list.map(({ choice, label }) => ({ label, ...(NOTES[choice] ? { note: NOTES[choice] } : {}), ...(choice === "clipboard" ? { localOnly: true as const } : {}) }));
+// Which terminal opens once an answer is accepted. A pane choice also marks its pane with the answer's id (see startRun).
+const NEXT: Record<Choice, { next: "terminal" } | { next: "pane"; tagged: true } | undefined> = {
+	prompt: { next: "terminal" },
+	clipboard: undefined,
+	"herdr-type": { next: "pane", tagged: true },
+	"herdr-run": { next: "pane", tagged: true },
+	cancel: undefined,
+};
+
+/** The choices as published on the dialog bus, each with its note and where it leads. */
+export function busChoices(list: Option[]): BusChoice[] {
+	return list.map(({ choice, label }) => ({ label, ...(NOTES[choice] ? { note: NOTES[choice] } : {}), ...(choice === "clipboard" ? { localOnly: true as const } : {}), ...NEXT[choice] }));
 }
 
 /** The selector title: why the agent hands this over, then exactly what the user would run. */

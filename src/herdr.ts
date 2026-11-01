@@ -75,8 +75,11 @@ export function sliceOutput(screen: string, token: string): string {
 	return cut ? `[earlier output omitted]\n${text}` : text;
 }
 
-/** Opens the pane below pi, focuses it, and starts the wrapper. */
-export async function startRun(exec: Exec, opts: { piPane: string; cwd: string; tmp: string; command: string; type: boolean; shell: "zsh" | "bash" }): Promise<HerdrRun> {
+/**
+ * Opens the pane below pi, focuses it, and starts the wrapper. With an `answerId` (an accepted answer from another
+ * extension), the new pane is marked `sb_answer=<answerId>` first, so Straw Boss can tell it is the pane this answer opened.
+ */
+export async function startRun(exec: Exec, opts: { piPane: string; cwd: string; tmp: string; command: string; type: boolean; shell: "zsh" | "bash"; answerId?: string }): Promise<HerdrRun> {
 	const token = randomBytes(4).toString("hex");
 	const dir = join(opts.tmp, "pi-robot-hand", token);
 	await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -91,6 +94,8 @@ export async function startRun(exec: Exec, opts: { piPane: string; cwd: string; 
 		await rm(dir, { recursive: true, force: true });
 		throw new Error(`herdr could not open a pane: ${split.stdout.trim() || `exit ${split.code}`}`);
 	}
+	// Best effort and once: if the tag fails Straw Boss grants no pane, and the command still runs.
+	if (opts.answerId) await exec(["pane", "report-metadata", paneId, "--source", "robot-hand", "--token", `sb_answer=${opts.answerId}`, "--ttl-ms", "600000"]).catch(() => undefined);
 	await exec(["pane", "focus", "--pane", opts.piPane, "--direction", "down"]);
 	const run = await exec(["pane", "run", paneId, `${opts.shell} ${shellQuote(script)}`]);
 	if (run.code !== 0) {

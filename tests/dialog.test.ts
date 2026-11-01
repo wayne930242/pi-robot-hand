@@ -16,7 +16,7 @@ interface Pending {
 	id: string;
 	toolCallId: string;
 	digest: string;
-	select: { title: string; choices: { label: string; note?: string; localOnly?: true }[]; copy: string };
+	select: { title: string; choices: { label: string; note?: string; localOnly?: true; next?: "terminal" | "pane"; tagged?: true }[]; copy: string };
 }
 const GOOD = "answer-id-0123456789";
 const ENV = { HERDR_PANE_ID: "w1:p2", PATH: "" };
@@ -43,7 +43,7 @@ function makeBus() {
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 // Drives robot_hand like pi does. The selector stays open until the test picks, presses Esc, or aborts.
-function start(params: Record<string, unknown>, setup: { signal?: AbortSignal; hasUI?: boolean; copy?: (text: string) => Promise<void>; selectThrows?: boolean; herdr?: (args: string[]) => string } = {}) {
+function start(params: Record<string, unknown>, setup: { signal?: AbortSignal; hasUI?: boolean; copy?: (text: string) => Promise<void>; selectThrows?: boolean; tagFails?: "exit" | "throw"; herdr?: (args: string[]) => string } = {}) {
 	const bus = makeBus();
 	const copied: string[] = [];
 	const herdr: string[][] = [];
@@ -58,6 +58,8 @@ function start(params: Record<string, unknown>, setup: { signal?: AbortSignal; h
 		on: (name: string, hook: () => void) => hooks.set(name, hook),
 		exec: async (_bin: string, args: string[]) => {
 			herdr.push(args);
+			if (args[1] === "report-metadata" && setup.tagFails === "throw") throw new Error("herdr is gone");
+			if (args[1] === "report-metadata" && setup.tagFails === "exit") return { stdout: "", code: 1, stderr: "nope", killed: false };
 			return { stdout: setup.herdr?.(args) ?? "", code: 0, stderr: "", killed: false };
 		},
 		sendMessage: () => {},
@@ -131,10 +133,10 @@ test("pending carries the id, the call, the digest of what the selector shows, a
 	);
 	assert.equal(pending.digest, createHash("sha256").update(JSON.stringify(["pi-dialog/1", "select", pending.select.title, run.state.options])).digest("hex"));
 	assert.deepEqual(pending.select.choices, [
-		{ label: "Type it into a new Herdr pane (I press Enter)", note: "Opens a pane with the command typed; press Enter there" },
-		{ label: "Put it in my prompt", note: "Lands in the terminal's prompt; press Enter there" },
+		{ label: "Type it into a new Herdr pane (I press Enter)", note: "Opens a pane with the command typed; press Enter there", next: "pane", tagged: true },
+		{ label: "Put it in my prompt", note: "Lands in the terminal's prompt; press Enter there", next: "terminal" },
 		{ label: "Copy it to the clipboard", note: "Copies on this computer", localOnly: true },
-		{ label: "Run it in a new Herdr pane", note: "Runs it at once in a new pane" },
+		{ label: "Run it in a new Herdr pane", note: "Runs it at once in a new pane", next: "pane", tagged: true },
 		{ label: "No, thanks" },
 	]);
 	run.pick(/No, thanks/);
@@ -418,4 +420,63 @@ test("the published choices are a copy: changing them does not change what answe
 	run.answer({ selections: [prompt] });
 	assert.deepEqual(run.bus.of("robot-hand:answer-result").map((entry) => entry.accepted), [true]);
 	await run.done;
+});
+
+// The pane an accepted answer opens carries the answer's own id, so Straw Boss can tell which pane is the owner's.
+const split = (args: string[]) => (args[1] === "split" ? JSON.stringify({ result: { pane: { pane_id: "w1:p9" } } }) : "");
+const TAG = ["pane", "report-metadata", "w1:p9", "--source", "robot-hand", "--token", `sb_answer=${GOOD}`, "--ttl-ms", "600000"];
+
+test("an accepted answer for a pane choice tags the new pane with its answerId, right after the split and before the command is started", async () => {
+	for (const pattern of [/Type it/, /Run it/]) {
+		const run = start(PARAMS, { herdr: split });
+		run.answer({ selections: [run.indexOf(pattern)] });
+		await run.done;
+		const verbs = run.herdr.map((args) => args[1]);
+		assert.deepEqual(verbs.slice(0, 2), ["split", "report-metadata"]);
+		assert.deepEqual(run.herdr[1], TAG);
+		assert.ok(verbs.indexOf("report-metadata") < verbs.indexOf("run"), "tagged before anything runs in the pane");
+		assert.equal(run.herdr.filter((args) => args[1] === "report-metadata").length, 1);
+		run.shutdown();
+	}
+});
+
+test("a terminal pick never tags", async () => {
+	for (const pattern of [/Type it/, /Run it/]) {
+		const run = start(PARAMS, { herdr: split });
+		run.pick(pattern);
+		await run.done;
+		assert.ok(run.herdr.some((args) => args[1] === "run"));
+		assert.ok(!run.herdr.some((args) => args[1] === "report-metadata"));
+		run.shutdown();
+	}
+});
+
+test("an answer for a choice that opens no pane tags nothing", async () => {
+	for (const pattern of [/prompt/, /clipboard/, /No, thanks/]) {
+		const run = start(PARAMS, { herdr: split });
+		run.answer({ selections: [run.indexOf(pattern)] });
+		await run.done;
+		assert.deepEqual(run.herdr, []);
+	}
+});
+
+test("a refused answer tags nothing and leaves the selector to the terminal", async () => {
+	const run = start(PARAMS, { herdr: split });
+	run.answer({ selections: [run.indexOf(/Run it/)], digest: "0".repeat(64) });
+	assert.deepEqual(run.herdr, []);
+	run.pick(/No, thanks/);
+	await run.done;
+	assert.deepEqual(run.herdr, []);
+});
+
+test("when tagging fails the command still runs, once and untagged, with no retry", async () => {
+	for (const failure of ["exit", "throw"] as const) {
+		const run = start(PARAMS, { herdr: split, tagFails: failure });
+		run.answer({ selections: [run.indexOf(/Run it/)] });
+		const result = await run.done;
+		assert.match(text(result) ?? "", /It is running there/);
+		assert.equal(run.herdr.filter((args) => args[1] === "report-metadata").length, 1, "one attempt, no retry");
+		assert.ok(run.herdr.some((args) => args[1] === "run"));
+		run.shutdown();
+	}
 });

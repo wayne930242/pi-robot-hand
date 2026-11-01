@@ -150,7 +150,7 @@ export function createRobotHand(copy: (text: string) => Promise<void> = copyToCl
 						await copy(offer.command);
 						ctx.ui.notify("Command copied to the clipboard.", "info");
 					} else if ((choice === "herdr-type" || choice === "herdr-run") && piPane) {
-						const run = await startRun(exec, { piPane, cwd: ctx.cwd, tmp, command: offer.command, type: choice === "herdr-type", shell: findShell(env.PATH) });
+						const run = await startRun(exec, { piPane, cwd: ctx.cwd, tmp, command: offer.command, type: choice === "herdr-type", shell: findShell(env.PATH), answerId: dialog.answerId });
 						runs.set(run.token, { run, ticks: 0, busy: false });
 						timer ??= setInterval(watch, WATCH_MS);
 					}
