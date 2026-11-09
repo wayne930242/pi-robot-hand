@@ -35,6 +35,18 @@ The agent calls `robot_hand` with a command and a one-line reason, and pi shows 
 - **Clipboard**: the raw command, for another terminal.
 - **Herdr pane**: when pi runs inside [Herdr](https://herdr.dev), a pane opens below pi with the command ready to edit and run, or already running. The pane is a real terminal, so password prompts, `y/N` confirmations, `ssh`, and full-screen programs work. When the command finishes, the pane closes and its output and exit code come back to the agent.
 
+Not sure what the command does? Press `e` in the selector and another model reads the command, the scripts it runs (a script extension or a `#!` line; files `secret_drop` protects are never read), the agent's reason, and your last message, then says what it will really do and whether that matches:
+
+```
+ ✗ Does not match the stated intent — anthropic/claude-haiku-5-5
+ Deletes /var/www, then restarts nginx.
+ The reason says it only restarts nginx; the script also deletes the site.
+```
+
+The first `e` asks which signed-in model to use and remembers it in `~/.pi/agent/robot-hand.json`; after a failed check, `e` asks again, and `E` always does.
+The check informs your choice and never blocks one. When you checked, the agent's result says which model checked and its verdict.
+It needs the terminal UI.
+
 The agent sets `default` to choose which option the selector starts on, and picks the Herdr pane for commands that need terminal input.
 Options this session cannot offer are hidden: the clipboard outside the terminal UI, Herdr outside Herdr.
 The pane runs the command with your `PATH` but without your `.zshrc`, so shell aliases are not available.
@@ -48,7 +60,7 @@ With pi-robot-hand, the agent answers as soon as the command finishes.
 ## `secret_drop`
 
 1. The agent calls `secret_drop` with where the secret goes and the steps to get it.
-2. You type or paste the secret into a masked dialog, or press Tab to ask the agent a question instead.
+2. You type or paste the secret into a masked dialog, or press Tab to reply to the agent instead: a question, or a note such as "it is already in `~/.config/gh/hosts.yml`". After a note, the agent uses that location without reading the value and does not ask again.
 3. Your prompt now holds a `!` command that applies it. Press Enter:
 
    ```

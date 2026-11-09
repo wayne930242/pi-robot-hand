@@ -4,7 +4,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { HandSelect } from "../src/hand-select.ts";
 import { digestOf } from "../src/dialog.ts";
 import { dialogTitle, resultText, toOffer } from "../src/hand.ts";
 import { createRobotHand } from "../src/index.ts";
@@ -40,6 +41,7 @@ function makeBus() {
 	};
 }
 
+const plain = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 // Drives robot_hand like pi does. The selector stays open until the test picks, presses Esc, or aborts.
@@ -64,7 +66,7 @@ function start(params: Record<string, unknown>, setup: { signal?: AbortSignal; h
 		},
 		sendMessage: () => {},
 	} as unknown as ExtensionAPI;
-	createRobotHand(setup.copy ?? (async (text) => void copied.push(text)), ENV, mkdtempSync(join(tmpdir(), "robot-hand-dialog-")))(pi);
+	createRobotHand(setup.copy ?? (async (text) => void copied.push(text)), ENV, mkdtempSync(join(tmpdir(), "robot-hand-dialog-")), mkdtempSync(join(tmpdir(), "robot-hand-agent-")))(pi);
 	const ctx = {
 		hasUI: setup.hasUI ?? true,
 		mode: "tui",
@@ -75,6 +77,21 @@ function start(params: Record<string, unknown>, setup: { signal?: AbortSignal; h
 				state.editor = text;
 			},
 			notify: () => {},
+			// The terminal selector robot_hand opens in tui mode, picked by keys.
+			custom: (factory: (...args: unknown[]) => HandSelect) => {
+				if (setup.selectThrows) return Promise.reject(new Error("selector broke"));
+				return new Promise<number | undefined>((resolve) => {
+					const select = factory({ requestRender: () => {} }, plain, {}, resolve);
+					state.selects++;
+					state.options = [...select.props.labels];
+					state.pick = (label) => {
+						const at = label === undefined ? -1 : state.options.indexOf(label);
+						if (at < 0) return select.handleInput("\x1b");
+						for (let i = 0; i < at; i++) select.handleInput("\x1b[B");
+						select.handleInput("\r");
+					};
+				});
+			},
 			select: (_title: string, options: string[], opts?: { signal?: AbortSignal }) => {
 				if (setup.selectThrows) return Promise.reject(new Error("selector broke"));
 				state.selects++;

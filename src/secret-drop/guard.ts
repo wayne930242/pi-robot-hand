@@ -52,7 +52,7 @@ function blockReason(path: string): string {
  * Split a command line into simple commands at `;`, `|`, `&`, newlines, and parentheses outside quotes,
  * and at every command substitution (`$(` or a backtick) outside single quotes.
  */
-function splitSegments(command: string): string[] {
+export function splitSegments(command: string): string[] {
 	const segments: string[] = [];
 	let current = "";
 	let quote: "'" | '"' | undefined;
@@ -89,7 +89,7 @@ function splitSegments(command: string): string[] {
 }
 
 /** Shell words of one simple command, quotes removed. Redirection operators are separate words. */
-function shellWords(segment: string): string[] {
+export function shellWords(segment: string): string[] {
 	const words: string[] = [];
 	let word = "";
 	let started = false;

@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { HandSelect } from "../src/hand-select.ts";
 import { startMarker } from "../src/herdr.ts";
 import { createRobotHand, HERDR_RESULT_TYPE, WATCH_MS } from "../src/index.ts";
+
+const plain = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 
 interface Harness {
 	editor: string;
@@ -14,6 +18,7 @@ interface Harness {
 	events: unknown[];
 	herdr: string[][];
 	sent: { message: Record<string, unknown>; options: unknown }[];
+	screens: (() => string)[];
 }
 
 // Registers the extension against a minimal pi and drives its tool the way pi does, with the
@@ -21,9 +26,23 @@ interface Harness {
 async function run(
 	params: Record<string, unknown>,
 	pick: RegExp | undefined,
-	setup: Partial<{ editor: string; mode: string; hasUI: boolean; env: NodeJS.ProcessEnv; tmp: string; herdr: (args: string[]) => { stdout: string; code: number } }> = {},
+	setup: Partial<{
+		editor: string;
+		mode: string;
+		hasUI: boolean;
+		env: NodeJS.ProcessEnv;
+		tmp: string;
+		herdr: (args: string[]) => { stdout: string; code: number };
+		agentDir: string;
+		cwd: string;
+		models: { provider: string; id: string }[];
+		complete: (model: { provider: string; id: string }, context: Context) => Promise<Partial<AssistantMessage>>;
+		branch: unknown[];
+		// Runs against the terminal selector before the pick, e.g. pressing `e`.
+		drive: (select: HandSelect) => Promise<void>;
+	}> = {},
 ) {
-	const harness: Harness = { editor: setup.editor ?? "", copied: [], selects: [], events: [], herdr: [], sent: [] };
+	const harness: Harness = { editor: setup.editor ?? "", copied: [], selects: [], events: [], herdr: [], sent: [], screens: [] };
 	let tool: ToolDefinition | undefined;
 	const pi = {
 		registerTool: (definition: ToolDefinition) => {
@@ -44,11 +63,17 @@ async function run(
 		},
 		setup.env ?? {},
 		setup.tmp ?? tmpdir(),
+		setup.agentDir ?? mkdtempSync(join(tmpdir(), "robot-hand-agent-")),
 	)(pi);
 	const ctx = {
 		hasUI: setup.hasUI ?? true,
 		mode: setup.mode ?? "tui",
-		cwd: "/repo",
+		cwd: setup.cwd ?? "/repo",
+		modelRegistry: {
+			getAvailable: () => setup.models ?? [],
+			complete: async (model: { provider: string; id: string }, context: Context) => ({ stopReason: "stop", content: [], ...(await setup.complete?.(model, context)) }),
+		},
+		sessionManager: { getBranch: () => setup.branch ?? [] },
 		ui: {
 			getEditorText: () => harness.editor,
 			setEditorText: (text: string) => {
@@ -58,6 +83,23 @@ async function run(
 			select: async (title: string, options: string[]) => {
 				harness.selects.push({ title, options });
 				return pick ? options.find((option) => pick.test(option)) : undefined;
+			},
+			// The terminal selector: built as pi builds it, then driven by keys.
+			custom: async (factory: (...args: unknown[]) => HandSelect) => {
+				let result: number | undefined | null = null;
+				const select = factory({ requestRender: () => {} }, plain, {}, (value: number | undefined) => {
+					result = value;
+				});
+				harness.selects.push({ title: select.props.title, options: [...select.props.labels] });
+				harness.screens.push(() => select.render(100).join("\n"));
+				await setup.drive?.(select);
+				const at = pick ? select.props.labels.findIndex((label) => pick.test(label)) : -1;
+				if (at < 0) select.handleInput("\x1b");
+				else {
+					for (let i = 0; i < at; i++) select.handleInput("\x1b[B");
+					select.handleInput("\r");
+				}
+				return result;
 			},
 		},
 	} as unknown as ExtensionContext;
@@ -151,4 +193,103 @@ test("a Herdr run opens a pane, ends the turn, and brings the agent back with th
 	assert.deepEqual(harness.sent[0]?.options, { triggerTurn: true, deliverAs: "followUp" });
 	assert.deepEqual(harness.herdr.at(-1), ["pane", "close", "w1:p9"]);
 	assert.deepEqual(readdirSync(join(tmp, "pi-robot-hand")), [], "the run's files are removed");
+});
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+const answer = (text: string) => async () => ({ content: [{ type: "text" as const, text }] });
+
+test("the first e asks for a model, checks the command with its scripts and the user's message, and remembers the model", async () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "robot-hand-agent-"));
+	const cwd = mkdtempSync(join(tmpdir(), "robot-hand-cwd-"));
+	writeFileSync(join(cwd, "deploy.sh"), "#!/bin/bash\nrm -rf /var/www\n");
+	writeFileSync(join(cwd, "notes.txt"), "not a script");
+	const seen: { model: string; prompt: string }[] = [];
+	let screen = "";
+	const { harness, result, text } = await run({ command: "bash deploy.sh && cat notes.txt", reason: "只看部署狀態" }, /No, thanks/, {
+		agentDir,
+		cwd,
+		models: [{ provider: "anthropic", id: "claude-haiku-5-5" }, { provider: "openai", id: "luna" }],
+		branch: [{ type: "message", message: { role: "user", content: [{ type: "text", text: "幫我看部署狀態就好" }] } }],
+		complete: async (model, context) => {
+			const first = context.messages[0];
+			seen.push({ model: `${model.provider}/${model.id}`, prompt: typeof first?.content === "string" ? first.content : "" });
+			return answer('{"verdict":"mismatch","does":"刪除 /var/www。","gaps":"說是看狀態，實際會刪檔。"}')();
+		},
+		drive: async (select) => {
+			select.handleInput("e");
+			assert.match(select.render(100).join("\n"), /Check with which model\?/);
+			select.handleInput("\x1b[B");
+			select.handleInput("\r");
+			await tick();
+			screen = select.render(100).join("\n");
+		},
+	});
+	assert.equal(seen.length, 1);
+	assert.equal(seen[0]?.model, "openai/luna");
+	assert.match(seen[0]?.prompt ?? "", /只看部署狀態/);
+	assert.match(seen[0]?.prompt ?? "", /幫我看部署狀態就好/);
+	assert.match(seen[0]?.prompt ?? "", /rm -rf \/var\/www/);
+	assert.doesNotMatch(seen[0]?.prompt ?? "", /not a script/);
+	assert.match(screen, /✗ Does not match the stated intent — openai\/luna/);
+	assert.match(screen, /說是看狀態，實際會刪檔。/);
+	assert.match(text, /declined.*verdict: mismatch.*刪除 \/var\/www。.*Differences: 說是看狀態/s);
+	assert.deepEqual((result.details as { check?: unknown }).check, { model: "openai/luna", verdict: "mismatch" });
+	assert.equal(JSON.parse(readFileSync(join(agentDir, "robot-hand.json"), "utf8")).checkModel, "openai/luna");
+	assert.equal(harness.selects.length, 1);
+});
+
+test("with a saved model, e checks at once; E opens the list again", async () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "robot-hand-agent-"));
+	writeFileSync(join(agentDir, "robot-hand.json"), JSON.stringify({ checkModel: "openai/luna" }));
+	const used: string[] = [];
+	await run({ command: "ls", reason: "看檔案" }, /prompt/, {
+		agentDir,
+		models: [{ provider: "openai", id: "luna" }],
+		complete: async (model) => {
+			used.push(model.id);
+			return answer('{"verdict":"match","does":"列出檔案。","gaps":""}')();
+		},
+		drive: async (select) => {
+			select.handleInput("e");
+			await tick();
+			assert.match(select.render(100).join("\n"), /✓ Matches the stated intent/);
+			select.handleInput("E");
+			assert.match(select.render(100).join("\n"), /openai\/luna \(saved\)/);
+			select.handleInput("\x1b");
+		},
+	});
+	assert.deepEqual(used, ["luna"]);
+});
+
+test("a failed check shows the error, the next e asks for another model, and the choices keep working", async () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "robot-hand-agent-"));
+	writeFileSync(join(agentDir, "robot-hand.json"), JSON.stringify({ checkModel: "openai/luna" }));
+	const { harness, text } = await run({ command: "ls", reason: "看檔案" }, /prompt/, {
+		agentDir,
+		models: [{ provider: "openai", id: "luna" }],
+		complete: async () => ({ stopReason: "error", errorMessage: "401 not signed in" }),
+		drive: async (select) => {
+			select.handleInput("e");
+			await tick();
+			assert.match(select.render(100).join("\n"), /openai\/luna could not check: 401 not signed in/);
+			select.handleInput("e");
+			assert.match(select.render(100).join("\n"), /Check with which model\?/);
+			select.handleInput("\x1b");
+		},
+	});
+	assert.equal(harness.editor, "! ls");
+	assert.doesNotMatch(text, /verdict/);
+});
+
+test("a saved model that is no longer signed in sends e to the list", async () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "robot-hand-agent-"));
+	writeFileSync(join(agentDir, "robot-hand.json"), JSON.stringify({ checkModel: "gone/model" }));
+	await run({ command: "ls", reason: "x" }, undefined, {
+		agentDir,
+		models: [{ provider: "openai", id: "luna" }],
+		drive: async (select) => {
+			select.handleInput("e");
+			assert.match(select.render(100).join("\n"), /Check with which model\?/);
+		},
+	});
 });

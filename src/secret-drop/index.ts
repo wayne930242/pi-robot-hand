@@ -34,7 +34,7 @@ const APPLY_SCRIPT = fileURLToPath(new URL("../../dist/apply.js", import.meta.ur
 interface DropDetails {
 	target: string;
 	command: string;
-	status: "entering" | "staged" | "cancelled" | "question" | "applied";
+	status: "entering" | "staged" | "cancelled" | "reply" | "applied";
 	message?: string;
 }
 
@@ -92,9 +92,13 @@ interface DropParams {
 	command?: string;
 }
 
-/** What the tool returns when the user asked a question instead of entering the secret. */
-export function questionResult(text: string): string {
-	return `The user did not enter the secret and asked instead: "${text}". Nothing was staged. Answer the question in chat, then call secret_drop again when they are ready.`;
+/** What the tool returns when the user replied instead of entering the secret. */
+export function replyResult(text: string): string {
+	return [
+		`The user did not enter the secret and replied instead: "${text}". Nothing was staged.`,
+		"If they asked a question, answer it in chat, then call secret_drop again when they are ready.",
+		"If they said the secret is already stored somewhere, or is not needed, do not call secret_drop again for it: point the program at that location without reading or printing the value, and ask the user when the location is unclear.",
+	].join(" ");
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -191,14 +195,14 @@ export default function secretDrop(pi: ExtensionAPI) {
 		name: "secret_drop",
 		label: "Secret Drop",
 		description:
-			"Have the user enter a secret without it entering the conversation. The user follows the instructions you give and types it into a masked dialog, or presses Tab to ask you a question instead, which the tool returns; it is staged outside the project, and a `!` apply command is pre-filled in the user's prompt. The tool waits until the user runs that command, then returns the apply script's report: what changed and a length check, never the value. Destinations are protected afterwards: reading or printing them is blocked and the value is redacted from tool output.",
+			"Have the user enter a secret without it entering the conversation. The user follows the instructions you give and types it into a masked dialog, or presses Tab to reply instead (a question, or a note such as where the secret already is), which the tool returns; it is staged outside the project, and a `!` apply command is pre-filled in the user's prompt. The tool waits until the user runs that command, then returns the apply script's report: what changed and a length check, never the value. Destinations are protected afterwards: reading or printing them is blocked and the value is redacted from tool output.",
 		promptSnippet: "Have the user put a secret into a file or command without the agent seeing it",
 		promptGuidelines: [
 			"Use secret_drop whenever a password, token, key, or other credential must land in a file or be fed to a command; never ask the user to paste secrets into chat.",
 			"Files that hold secrets are consumed by programs, never read or printed by the agent.",
 			"Give secret_drop instructions the user can follow without asking: the exact page or menu, every field to fill in, and what to copy; write them and the label in the user's language.",
 			"When the secret is newly created on a web page and a browser session on the user's signed-in profile is already open to you, ask with your question tool whether to prepare that page up to its final create button, so the user only presses it and copies the value; then make no browser call in that session until the user tells you, when you ask, that the tab is closed, whatever secret_drop returns. Give the URL and steps instead of opening a page that shows an existing secret, and full steps when the user declines.",
-			"When secret_drop returns a question from the user, answer it, then call secret_drop again.",
+			"When secret_drop returns the user's reply, act on it: answer a question, then call secret_drop again; when they say the secret is already stored somewhere, use that location instead of asking again, without reading the value.",
 		],
 		parameters: Params,
 		executionMode: "sequential",
@@ -237,7 +241,7 @@ export default function secretDrop(pi: ExtensionAPI) {
 									["Next", next],
 								],
 								warning: replacesFile ? "Replaces the entire existing file" : undefined,
-								footer: "Stuck or unsure? Press Tab and ask; the dialog closes and the agent answers.",
+								footer: "Stuck, or is the secret already saved somewhere? Press Tab and reply; the dialog closes and the agent reads it.",
 								check,
 							},
 							theme,
@@ -256,10 +260,10 @@ export default function secretDrop(pi: ExtensionAPI) {
 						details: { ...details, status: "cancelled" },
 					};
 				}
-				if (choice.kind === "question") {
+				if (choice.kind === "reply") {
 					return {
-						content: [{ type: "text", text: questionResult(choice.text) }],
-						details: { ...details, status: "question", message: choice.text },
+						content: [{ type: "text", text: replyResult(choice.text) }],
+						details: { ...details, status: "reply", message: choice.text },
 					};
 				}
 				const value = choice.value;
@@ -322,7 +326,7 @@ export default function secretDrop(pi: ExtensionAPI) {
 			if (details.status === "entering") return new Text(theme.fg("dim", `Waiting for secret input → ${details.target}`), 0, 0);
 			if (details.status === "staged") return new Text(theme.fg("dim", `Staged — press Enter on: ${details.command}`), 0, 0);
 			if (details.status === "cancelled") return new Text(theme.fg("warning", "Cancelled — nothing applied"), 0, 0);
-			if (details.status === "question") return new Text(theme.fg("warning", `Asked instead — nothing applied: ${details.message ?? ""}`), 0, 0);
+			if (details.status === "reply") return new Text(theme.fg("warning", `Replied instead — nothing applied: ${details.message ?? ""}`), 0, 0);
 			return new Text(`${theme.fg("success", "✓ ")}${theme.fg("text", details.message ?? details.target)}`, 0, 0);
 		},
 	});

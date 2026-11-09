@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { replyResult } from "../src/secret-drop/index.ts";
 import { dialogOptions } from "../src/secret-drop/secret-input.ts";
 
 test("PI_ASK_USER_DISPLAY_MODE=inline renders the dialog inline", () => {
@@ -61,23 +62,32 @@ test("Enter stages the masked secret", () => {
 	assert.deepEqual(results, [{ kind: "secret", value: "ghp_abc" }]);
 });
 
-test("Tab switches to a visible question; Enter returns it and drops the secret", () => {
+test("Tab switches to a visible reply; Enter returns it and drops the secret", () => {
 	const { input, results, type, screen } = dialog();
 	type("half-typed");
 	input.handleInput("\t");
+	assert.match(screen(), /a question, or a note such as "already saved in ~\/\.config\/app"/);
 	type("哪裡找 Workflows 權限？");
-	assert.match(screen(), /\? 哪裡找 Workflows 權限？/);
-	assert.match(screen(), /Enter send question/);
+	assert.match(screen(), /↩ 哪裡找 Workflows 權限？/);
+	assert.match(screen(), /Enter send reply/);
 	input.handleInput("\r");
-	assert.deepEqual(results, [{ kind: "question", text: "哪裡找 Workflows 權限？" }]);
+	assert.deepEqual(results, [{ kind: "reply", text: "哪裡找 Workflows 權限？" }]);
 });
 
-test("an empty question keeps the dialog open; Tab goes back to the secret", () => {
+test("the reply result lets the agent use a secret that is already stored, without reading it", () => {
+	const text = replyResult("已經在 ~/.config/gh/hosts.yml 裡了");
+	assert.match(text, /replied instead: "已經在 ~\/\.config\/gh\/hosts\.yml 裡了"\. Nothing was staged\./);
+	assert.match(text, /do not call secret_drop again for it/);
+	assert.match(text, /without reading or printing the value/);
+	assert.match(text, /answer it in chat, then call secret_drop again/);
+});
+
+test("an empty reply keeps the dialog open; Tab goes back to the secret", () => {
 	const { input, results, type, screen } = dialog();
 	input.handleInput("\t");
 	input.handleInput("\r");
 	assert.deepEqual(results, []);
-	assert.match(screen(), /Type your question first/);
+	assert.match(screen(), /Type your reply first/);
 	input.handleInput("\t");
 	type("s3cret");
 	input.handleInput("\r");

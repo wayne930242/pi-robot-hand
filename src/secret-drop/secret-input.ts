@@ -1,6 +1,7 @@
 /**
  * Masked secret entry dialog. Keeps the value in this component only and hands it to `done`.
- * Tab switches to a visible question field, so the user can ask the agent instead of cancelling.
+ * Tab switches to a visible reply field, so the user can answer the agent instead of cancelling: a question,
+ * or a note such as where the secret already is.
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -39,8 +40,8 @@ export interface SecretPrompt {
 	maxLines?: () => number;
 }
 
-/** What the dialog closes with: the secret, or a question the user asked instead. */
-export type DialogResult = { kind: "secret"; value: string } | { kind: "question"; text: string };
+/** What the dialog closes with: the secret, or the user's reply instead of it. */
+export type DialogResult = { kind: "secret"; value: string } | { kind: "reply"; text: string };
 
 /**
  * `ctx.ui.custom` options for the dialog. Pi-TUI overlays cannot draw over rows holding terminal
@@ -61,8 +62,8 @@ function isPrintable(data: string): boolean {
 export class SecretInput implements Component, Focusable {
 	focused = false;
 	private value = "";
-	private question = "";
-	private mode: "secret" | "question" = "secret";
+	private reply = "";
+	private mode: "secret" | "reply" = "secret";
 	private reveal = false;
 	private error: string | undefined;
 	private inPaste = false;
@@ -91,25 +92,25 @@ export class SecretInput implements Component, Focusable {
 		this.closed = true;
 		this.done(result);
 		this.value = "";
-		this.question = "";
+		this.reply = "";
 		this.pasteBuffer = "";
 	}
 
 	private append(text: string): void {
-		if (this.mode === "question") this.question += text.replace(/\s*\n\s*/g, " ");
+		if (this.mode === "reply") this.reply += text.replace(/\s*\n\s*/g, " ");
 		else this.value += text;
 		this.error = undefined;
 	}
 
 	private submit(): void {
-		if (this.mode === "question") {
-			const text = this.question.trim();
+		if (this.mode === "reply") {
+			const text = this.reply.trim();
 			if (!text) {
-				this.error = "Type your question first, or press Tab to go back to the secret.";
+				this.error = "Type your reply first, or press Tab to go back to the secret.";
 				this.requestRender();
 				return;
 			}
-			this.finish({ kind: "question", text });
+			this.finish({ kind: "reply", text });
 			return;
 		}
 		const error = this.prompt.check(this.value);
@@ -151,17 +152,17 @@ export class SecretInput implements Component, Focusable {
 			this.submit();
 			return;
 		}
-		const asking = this.mode === "question";
+		const replying = this.mode === "reply";
 		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
-			this.mode = asking ? "secret" : "question";
+			this.mode = replying ? "secret" : "reply";
 			this.error = undefined;
 		} else if (matchesKey(data, "ctrl+r")) {
-			if (!asking) this.reveal = !this.reveal;
+			if (!replying) this.reveal = !this.reveal;
 		} else if (kb.matches(data, "tui.editor.deleteToLineStart")) {
-			if (asking) this.question = "";
+			if (replying) this.reply = "";
 			else this.value = "";
 		} else if (kb.matches(data, "tui.editor.deleteCharBackward")) {
-			if (asking) this.question = [...this.question].slice(0, -1).join("");
+			if (replying) this.reply = [...this.reply].slice(0, -1).join("");
 			else this.value = [...this.value].slice(0, -1).join("");
 		} else {
 			const printable = decodeKittyPrintable(data) ?? (isPrintable(data) ? data : undefined);
@@ -202,7 +203,7 @@ export class SecretInput implements Component, Focusable {
 	render(width: number): string[] {
 		const t = this.theme;
 		const inner = Math.max(10, width - 4);
-		const asking = this.mode === "question";
+		const replying = this.mode === "reply";
 		const wrapped = (text: string) => wrapTextWithAnsi(text, inner);
 
 		const head = wrapped(t.bold(t.fg("text", this.prompt.label)));
@@ -215,26 +216,23 @@ export class SecretInput implements Component, Focusable {
 		if (this.prompt.warning) facts.push(...wrapped(t.bold(t.fg("error", `⚠ ${this.prompt.warning}`))));
 
 		const entry: string[] = [];
-		const secretMarker = asking ? t.fg("dim", "  ") : t.fg("accent", "› ");
+		const secretMarker = replying ? t.fg("dim", "  ") : t.fg("accent", "› ");
 		entry.push(`${secretMarker}${this.field(inner - 2)}`);
 		const chars = [...this.value].length;
 		const lines = this.value.length === 0 ? 0 : this.value.split("\n").length;
 		entry.push(t.fg("dim", `  ${chars} char${chars === 1 ? "" : "s"}${lines > 1 ? `, ${lines} lines` : ""}`));
-		if (asking) {
-			if (this.question)
-				wrapTextWithAnsi(t.fg("text", this.question), inner - 2).forEach((line, i) =>
-					entry.push(`${i === 0 ? t.fg("accent", "? ") : "  "}${line}`),
-				);
-			else entry.push(`${t.fg("accent", "? ")}${t.fg("dim", "ask the agent instead; visible and sent to the chat")}`);
+		if (replying) {
+			const shown = this.reply ? t.fg("text", this.reply) : t.fg("dim", 'a question, or a note such as "already saved in ~/.config/app"; visible and sent to the chat');
+			wrapTextWithAnsi(shown, inner - 2).forEach((line, i) => entry.push(`${i === 0 ? t.fg("accent", "↩ ") : "  "}${line}`));
 		}
 		if (this.error) entry.push(...wrapped(t.fg("error", this.error)));
 
 		const help = wrapped(
 			t.fg(
 				"dim",
-				asking
-					? "Enter send question (nothing is staged) · Tab back to the secret · Esc cancel · Ctrl+U clear"
-					: "Enter stage · Tab ask a question instead · Esc cancel · Ctrl+R show/hide · Ctrl+U clear",
+				replying
+					? "Enter send reply (nothing is staged) · Tab back to the secret · Esc cancel · Ctrl+U clear"
+					: "Enter stage · Tab reply instead · Esc cancel · Ctrl+R show/hide · Ctrl+U clear",
 			),
 		);
 		const footer = wrapped(t.fg("dim", this.prompt.footer));

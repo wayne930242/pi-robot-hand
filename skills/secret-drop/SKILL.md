@@ -5,7 +5,7 @@ description: Use when a password, token, API key, certificate, or other credenti
 
 # Secret Drop
 
-Secrets reach files and commands through the `secret_drop` tool, so the value never enters the conversation. The user follows the steps you give, types it into a masked dialog or asks you a question instead; it is staged outside the project; pi pre-fills a `!` apply command in the user's prompt; the user runs it. The tool waits for that run and returns the apply script's report: what changed and a length check. Files that hold secrets are opaque to the agent: programs consume them, the agent never reads them.
+Secrets reach files and commands through the `secret_drop` tool, so the value never enters the conversation. The user follows the steps you give, types it into a masked dialog or replies to you instead; it is staged outside the project; pi pre-fills a `!` apply command in the user's prompt; the user runs it. The tool waits for that run and returns the apply script's report: what changed and a length check. Files that hold secrets are opaque to the agent: programs consume them, the agent never reads them.
 
 ## Writing a secret
 
@@ -21,7 +21,7 @@ Secrets reach files and commands through the `secret_drop` tool, so the value ne
      - `kubectl create secret generic app-tls --from-file=tls.key={secret}`
 4. Call it once per secret and wait for the result:
    - **Applied**: the report states the change and `length check passed (N chars)`. That report is the verification; the value is in place.
-   - **Question**: the user pressed Tab and asked instead; nothing was staged. Answer it, then call `secret_drop` again.
+   - **Reply**: the user pressed Tab and replied instead; nothing was staged. A question: answer it, then call `secret_drop` again. A note that the secret is already stored somewhere or is not needed: do not call `secret_drop` again for it; point the program at that location without reading or printing the value, and ask when the location is unclear.
    - **Cancelled or aborted**: nothing was applied. Ask the user how to proceed; have the user revoke a token created on a prepared page that was not applied.
    - **Apply failed**: the staged value was discarded. Fix the parameters from the error (a regex that does not match, a failing command) and call again.
 

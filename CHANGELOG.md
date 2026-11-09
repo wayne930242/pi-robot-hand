@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `robot_hand`: press `e` in the terminal selector to have another model check the command. It reads the command, the scripts the command runs (files with a script extension or a `#!` line, up to five, 16 KB each; files `secret_drop` protects and its staging folder are never read), the agent's reason, and the user's last message, and shows what the command will do and whether that matches: match, partial, mismatch, or unclear. The first `e`, and the next one after a failed check, asks which signed-in model to use; `E` always asks. The choice is saved as `checkModel` in `~/.pi/agent/robot-hand.json`. The check never blocks a choice; when the user checked, the tool result carries the verdict and `details.check`. In the terminal UI the selector is now robot_hand's own component; RPC clients keep pi's selector and get no check. The dialog contract (title, labels, digest) is unchanged.
+- `secret_drop`: Tab now opens a reply instead of a question. The user can ask a question or leave a note such as where the secret already is. The result tells the agent to answer a question and call again, or to use the stated location without reading the value and not ask again. `details.status` is `"reply"` (was `"question"`).
+
 ## 0.4.0
 
 - The two Herdr pane choices now carry `next: "pane"` and `tagged: true` in `robot-hand:pending`, and "Put it in my prompt" carries `next: "terminal"` (hints, not hashed). When another extension's answer picks a pane choice, the new pane is marked with `herdr pane report-metadata <pane_id> --source robot-hand --token sb_answer=<answerId> --ttl-ms 600000` right after the split and before the command is typed or run, so Straw Boss grants its terminal keys to that pane and no other. Tagging is tried once; a failure does not stop the command. A pick in the terminal tags nothing.

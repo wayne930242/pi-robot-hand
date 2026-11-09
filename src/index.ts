@@ -6,12 +6,16 @@
  */
 
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { copyToClipboard, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { type CheckInput, type CheckResult, checkSummary, findScripts, lastUserText, loadCheckModel, modelRef, protectedPaths, runCheck, saveCheckModel, secretGuard, settingsPath, type Verdict } from "./check.ts";
 import { openDialog } from "./dialog.ts";
-import { busChoices, type Choice, dialogTitle, options, promptText, resultText, toOffer } from "./hand.ts";
+import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, resultText, toOffer } from "./hand.ts";
+import { HandSelect } from "./hand-select.ts";
+import { dialogOptions } from "./secret-drop/secret-input.ts";
 import { checkRun, cleanup, type Exec, findShell, type HerdrRun, outcomeText, startRun } from "./herdr.ts";
 
 interface HandDetails {
@@ -19,6 +23,8 @@ interface HandDetails {
 	status: "waiting" | Choice;
 	/** Present when another extension answered the selector. */
 	answeredFrom?: "browser";
+	/** Present when the user ran the `e` check before choosing. */
+	check?: { model: string; verdict: Verdict };
 }
 
 export const HERDR_RESULT_TYPE = "robot-hand-herdr";
@@ -45,7 +51,20 @@ const Params = Type.Object({
 	),
 });
 
-export function createRobotHand(copy: (text: string) => Promise<void> = copyToClipboard, env: NodeJS.ProcessEnv = process.env, tmp: string = tmpdir()) {
+/** What the check reads, gathered once per hand-over on the first `e`. */
+async function checkInput(offer: Offer, reason: string, ctx: ExtensionContext, agentDir: string): Promise<CheckInput> {
+	const secretDrop = join(agentDir, "secret-drop");
+	const isSecret = secretGuard(await protectedPaths(join(secretDrop, "registry.json")), secretDrop);
+	const scripts = offer.kind === "shell" ? await findScripts(offer.command, ctx.cwd, isSecret) : [];
+	return { command: offer.command, kind: offer.kind, reason, userMessage: lastUserText(ctx.sessionManager.getBranch()), scripts };
+}
+
+export function createRobotHand(
+	copy: (text: string) => Promise<void> = copyToClipboard,
+	env: NodeJS.ProcessEnv = process.env,
+	tmp: string = tmpdir(),
+	agentDir: string = getAgentDir(),
+) {
 	return function robotHand(pi: ExtensionAPI) {
 		const exec: Exec = async (args) => {
 			const result = await pi.exec(env.HERDR_BIN_PATH || "herdr", args);
@@ -91,15 +110,64 @@ export function createRobotHand(copy: (text: string) => Promise<void> = copyToCl
 			runs.clear();
 		});
 
+		// The terminal selector with the `e` check. Resolves with the picked index (undefined for Esc or abort)
+		// and the last finished check.
+		const pickInTerminal = async (
+			title: string,
+			labels: string[],
+			offer: Offer,
+			reason: string,
+			ctx: ExtensionContext,
+			signal: AbortSignal,
+		): Promise<{ index: number | undefined; check?: CheckResult }> => {
+			const settings = settingsPath(agentDir);
+			let saved = loadCheckModel(settings);
+			const checks = new AbortController();
+			let input: Promise<CheckInput> | undefined;
+			let select: HandSelect | undefined;
+			try {
+				const index = await ctx.ui.custom<number | undefined>((tui, theme, _keybindings, done) => {
+					select = new HandSelect(
+						{
+							title,
+							labels,
+							models: () => ctx.modelRegistry.getAvailable().map(modelRef),
+							saved: () => saved,
+							pick: (model) => {
+								saved = model;
+								saveCheckModel(settings, model).catch((error: unknown) => ctx.ui.notify(`robot_hand could not save the check model: ${(error as Error).message}`, "warning"));
+							},
+							check: async (ref) => {
+								const model = ctx.modelRegistry.getAvailable().find((candidate) => modelRef(candidate) === ref);
+								if (!model) throw new Error("it is no longer signed in");
+								input ??= checkInput(offer, reason, ctx, agentDir);
+								return runCheck((m, context, options) => ctx.modelRegistry.complete(m, context, options), model, await input, checks.signal);
+							},
+						},
+						theme,
+						() => tui.requestRender(),
+						done,
+					);
+					if (signal.aborted) select.cancel();
+					else signal.addEventListener("abort", () => select?.cancel(), { once: true });
+					return select;
+				}, dialogOptions());
+				return { index, check: select?.result };
+			} finally {
+				checks.abort();
+			}
+		};
+
 		pi.registerTool({
 			name: "robot_hand",
 			label: "Robot Hand",
 			description:
-				"Hand the user a command to run themselves. The user sees the command and the reason, then puts it in their pi prompt (a shell command becomes `! command`, whose output returns to the conversation when they press Enter), copies it to the clipboard, sends it to a new Herdr pane (closed when it finishes, its output returning as a message), or declines. The tool returns the user's choice; it never runs the command.",
+				"Hand the user a command to run themselves. The user sees the command and the reason, then puts it in their pi prompt (a shell command becomes `! command`, whose output returns to the conversation when they press Enter), copies it to the clipboard, sends it to a new Herdr pane (closed when it finishes, its output returning as a message), or declines. In the terminal the user can first have another model check the command against your reason; the result then includes that verdict. The tool returns the user's choice; it never runs the command.",
 			promptSnippet: "Hand the user a command to run themselves, via their pi prompt, clipboard, or a Herdr pane",
 			promptGuidelines: [
 				"Use robot_hand when the user has to run a command themselves: pi slash commands such as /reload, interactive or sudo commands, commands a guard blocked, or anything they asked to run on their own.",
 				"Pass one command per robot_hand call and write the reason in the user's language.",
+				"Make the robot_hand reason say what the command does and what it is for: the user can press e to have another model check the command and the scripts it runs against that reason.",
 				"Set robot_hand `default` to herdr-type for a command that needs terminal input (password, sudo, confirmation, ssh, a full-screen program); pi's `!` gives it no terminal.",
 				"After robot_hand places, copies, or sends a command, nothing has run yet: wait for the user or the result message instead of assuming the result.",
 			],
@@ -126,18 +194,21 @@ export function createRobotHand(copy: (text: string) => Promise<void> = copyToCl
 					onUpdate?.({ content: [{ type: "text", text: "Waiting for the user to take the command..." }], details: { command: text, status: "waiting" } });
 					pi.events.emit("herdr:blocked", { active: true, label: "Waiting for the user to take a command" });
 					let won: number | undefined;
+					let checked: CheckResult | undefined;
 					try {
-						let picked: string | undefined;
-						if (dialog.open) {
-							picked = await ctx.ui.select(
-								title,
-								choices.map((option) => option.label),
-								{ signal: dialog.signal },
-							);
+						const labels = choices.map((option) => option.label);
+						let at: number | undefined;
+						if (dialog.open && ctx.mode === "tui") {
+							const picked = await pickInTerminal(title, labels, offer, params.reason, ctx, dialog.signal);
+							at = picked.index;
+							checked = picked.check;
+						} else if (dialog.open) {
+							const picked = await ctx.ui.select(title, labels, { signal: dialog.signal });
+							const found = labels.indexOf(picked ?? "");
+							at = found < 0 ? undefined : found;
 						}
 						// Settle right after the selector resolves, before anything else can run.
-						const at = choices.findIndex((option) => option.label === picked);
-						won = dialog.finish(at < 0 ? undefined : at);
+						won = dialog.finish(at);
 					} finally {
 						pi.events.emit("herdr:blocked", { active: false });
 					}
@@ -154,9 +225,15 @@ export function createRobotHand(copy: (text: string) => Promise<void> = copyToCl
 						runs.set(run.token, { run, ticks: 0, busy: false });
 						timer ??= setInterval(watch, WATCH_MS);
 					}
+					const summary = checked ? `\n\n${checkSummary(checked)}` : "";
 					return {
-						content: [{ type: "text", text: resultText(choice, offer) }],
-						details: { command: text, status: choice, ...(dialog.remote ? { answeredFrom: "browser" } : {}) } satisfies HandDetails,
+						content: [{ type: "text", text: `${resultText(choice, offer)}${summary}` }],
+						details: {
+							command: text,
+							status: choice,
+							...(dialog.remote ? { answeredFrom: "browser" } : {}),
+							...(checked ? { check: { model: checked.model, verdict: checked.verdict } } : {}),
+						} satisfies HandDetails,
 						// The next move is the user's; a follow-up from the agent would only talk over it.
 						terminate: choice !== "cancel",
 					};
@@ -179,11 +256,12 @@ export function createRobotHand(copy: (text: string) => Promise<void> = copyToCl
 					return new Text(first?.type === "text" ? first.text : "", 0, 0);
 				}
 				if (details.status === "waiting") return new Text(theme.fg("dim", "Waiting for you to take the command"), 0, 0);
-				if (details.status === "prompt") return new Text(`${theme.fg("success", "✓ ")}In your prompt — press Enter to run it`, 0, 0);
-				if (details.status === "clipboard") return new Text(`${theme.fg("success", "✓ ")}Copied to your clipboard`, 0, 0);
-				if (details.status === "herdr-type") return new Text(`${theme.fg("success", "✓ ")}In a new Herdr pane — press Enter there to run it`, 0, 0);
-				if (details.status === "herdr-run") return new Text(`${theme.fg("success", "✓ ")}Running in a new Herdr pane`, 0, 0);
-				return new Text(theme.fg("warning", "Declined — nothing placed or run"), 0, 0);
+				const checked = details.check ? theme.fg("dim", ` · checked by ${details.check.model}: ${details.check.verdict}`) : "";
+				if (details.status === "prompt") return new Text(`${theme.fg("success", "✓ ")}In your prompt — press Enter to run it${checked}`, 0, 0);
+				if (details.status === "clipboard") return new Text(`${theme.fg("success", "✓ ")}Copied to your clipboard${checked}`, 0, 0);
+				if (details.status === "herdr-type") return new Text(`${theme.fg("success", "✓ ")}In a new Herdr pane — press Enter there to run it${checked}`, 0, 0);
+				if (details.status === "herdr-run") return new Text(`${theme.fg("success", "✓ ")}Running in a new Herdr pane${checked}`, 0, 0);
+				return new Text(`${theme.fg("warning", "Declined — nothing placed or run")}${checked}`, 0, 0);
 			},
 		});
 	};
