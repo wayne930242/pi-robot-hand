@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1
+
+- The `e` check reads a reply the user typed into `secret_drop`'s dialog from the tool's details, not its text, and lists it as the user's; the rest of what happened after the user's last message goes to the checker fenced and marked untrusted, and cannot change the user's request. Before, tool output could imitate a user reply and turn a mismatch into a match.
+- Secret values are redacted before any text is cut (the user's message, the log, replies, scripts), so a secret that straddled a cut no longer reaches the checker in part.
+
 ## 0.5.0
 
 - `robot_hand`: press `e` in the terminal selector to have another model check the command. It reads the command, the scripts the command runs (files with a script extension or a `#!` line, up to five, 16 KB each; files `secret_drop` protects and its staging folder are never read), the agent's reason, the user's last message, and what happened after it (agent text and tool results, up to 2,000 characters, so a reply given inside `secret_drop` or a question dialog counts), and shows what the command will do and whether that matches: match, partial, mismatch, or unclear. The first `e`, and the next one after a failed check, asks which signed-in model to use; `E` always asks. The choice is saved as `checkModel` in `~/.pi/agent/robot-hand.json`. Known `secret_drop` values in the command, scripts, reason, and message are replaced with `[REDACTED]` before sending; an unreadable or unknown secret_drop registry fails the check and sends nothing. Command and script text go to the checker fenced, marked as data. The checker answers in the language of the user's last message, or of the reason when there is none. Starting a new check aborts the one still running. The check never blocks a choice; when the user checked, the tool result carries the verdict and `details.check`. In the terminal UI the selector is now robot_hand's own component (↑↓ or j/k, stopping at the ends as before); `app.tools.expand` does not work while it is open. RPC clients keep pi's selector and get no check. The dialog contract (title, labels, digest) is unchanged.
