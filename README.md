@@ -35,7 +35,7 @@ The agent calls `robot_hand` with a command and a one-line reason, and pi shows 
 - **Clipboard**: the raw command, for another terminal.
 - **Herdr pane**: when pi runs inside [Herdr](https://herdr.dev), a pane opens below pi with the command ready to edit and run, or already running. The pane is a real terminal, so password prompts, `y/N` confirmations, `ssh`, and full-screen programs work. When the command finishes, the pane closes and its output and exit code come back to the agent.
 
-Not sure what the command does? Press `e` in the selector and another model reads the command, the scripts it runs (a script extension or a `#!` line; files `secret_drop` protects are never read), the agent's reason, your last message, what you replied in `secret_drop`'s dialog since, and a short log of what happened after your message (marked untrusted), then says, in your language, what it will really do and whether that matches:
+Not sure what the command does? Press `e` in the selector and another model reads the command, the scripts it runs (a script extension or a `#!` line; files `secret_drop` protects are never read), the agent's reason, your last message, what you answered since in a dialog tool (`secret_drop`, `ask_user_question`, `ask_user`, and any tool named in `dialogTools` in `~/.pi/agent/robot-hand.json`; their records go over whole, each field redacted and cut to its start and end), and a short log of what happened after your message (marked untrusted), then says, in your language, what it will really do and whether that matches:
 
 ```
  ✗ Does not match the stated intent — anthropic/claude-haiku-5-5

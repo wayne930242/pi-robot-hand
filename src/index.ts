@@ -11,7 +11,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { copyToClipboard, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type CheckInput, type CheckResult, afterUserMessage, checkSummary, failureNote, findScripts, lastUserText, loadCheckModel, loadSecrets, modelRef, orderModels, redactInput, runCheck, saveCheckModel, settingsPath, type Verdict } from "./check.ts";
+import { type CheckInput, type CheckResult, afterUserMessage, checkSummary, failureNote, findScripts, lastUserText, loadCheckModel, loadDialogTools, loadSecrets, modelRef, orderModels, redactInput, runCheck, saveCheckModel, settingsPath, type Verdict } from "./check.ts";
 import { openDialog } from "./dialog.ts";
 import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, resultText, toOffer } from "./hand.ts";
 import { HandSelect } from "./hand-select.ts";
@@ -53,10 +53,11 @@ const Params = Type.Object({
 
 /** What the check reads, gathered once per hand-over on the first `e`. */
 async function checkInput(offer: Offer, reason: string, ctx: ExtensionContext, agentDir: string): Promise<CheckInput> {
+	const dialogTools = loadDialogTools(settingsPath(agentDir));
 	const secrets = await loadSecrets(join(agentDir, "secret-drop"));
 	const scripts = offer.kind === "shell" ? await findScripts(offer.command, ctx.cwd, secrets.isSecret, secrets.redact) : [];
 	const branch = ctx.sessionManager.getBranch();
-	const after = afterUserMessage(branch, secrets.redact);
+	const after = afterUserMessage(branch, secrets.redact, dialogTools);
 	return redactInput(
 		{ command: offer.command, kind: offer.kind, reason, userMessage: lastUserText(branch, secrets.redact), replies: after.replies, since: after.log, scripts },
 		secrets.redact,

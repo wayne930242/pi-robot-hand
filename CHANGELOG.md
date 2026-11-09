@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3
+
+- The `e` check counts answers given in dialog tools as the user's, not only `secret_drop` replies: `ask_user_question` and `ask_user` are built in, and `dialogTools` (a list of tool names) in `~/.pi/agent/robot-hand.json` adds more. A dialog tool's details go to the checker whole, without parsing its format; each string field is redacted first and cut to 300 characters (start and end), the record to 1,500, and all answers to the latest 6,000. The checker is told that only what the user typed or picked is theirs; questions, option labels, previews, commands, and reports were written by the agent or the tool. Other tools' details stay out.
+
 ## 0.5.2
 
 - The check's model list puts the provider pi is using now first. pi lists every model of a provider that has a stored credential, even an expired one, so a provider whose check failed is marked `(sign-in failed)` or `(check failed)` and moved to the end for the rest of the session; a successful check clears the mark. The filter line reads `Filter:`.
