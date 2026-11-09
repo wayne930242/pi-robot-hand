@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkContext, findScripts, lastUserText, loadSecrets, parseCheck, redactInput } from "../src/check.ts";
+import { checkContext, findScripts, lastUserText, loadSecrets, parseCheck, redactInput, sinceUserText } from "../src/check.ts";
 
 test("scripts the command runs are read; secret files, plain files, and binaries are not", async () => {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "robot-hand-check-")));
@@ -84,4 +84,31 @@ test("secret values are hidden from the check model wherever they appear", async
 test("script text is fenced so it cannot close its own block", () => {
 	const prompt = String(checkContext({ command: "sh x.sh", kind: "shell", reason: "r", scripts: [{ path: "/x.sh", text: "echo ```\n```", truncated: false }] }).messages[0]?.content);
 	assert.match(prompt, /````\necho ```\n```\n````/);
+});
+
+test("what happened after the user's last message reaches the check, so a reply inside a tool counts", () => {
+	const branch = [
+		{ type: "message", message: { role: "user", content: "earlier" } },
+		{ type: "message", message: { role: "user", content: "用 secret_drop 請我輸入 GitHub token" } },
+		{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "好，開對話框。" }, { type: "toolCall", name: "secret_drop" }] } },
+		{ type: "message", message: { role: "toolResult", toolName: "secret_drop", content: [{ type: "text", text: 'replied instead: "已經在 ~/.config/gh/hosts.yml 了"' }] } },
+		{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "robot_hand" }] } },
+	];
+	assert.equal(
+		sinceUserText(branch),
+		'Agent: 好，開對話框。\nAgent called secret_drop\nsecret_drop result: replied instead: "已經在 ~/.config/gh/hosts.yml 了"\nAgent called robot_hand',
+	);
+	const prompt = String(checkContext({ command: "x", kind: "shell", reason: "r", userMessage: lastUserText(branch), since: sinceUserText(branch), scripts: [] }).messages[0]?.content);
+	assert.match(prompt, /The user's last message:\n用 secret_drop.*What happened after that message, latest last:\nAgent: 好/s);
+	assert.equal(sinceUserText([{ type: "message", message: { role: "user", content: "only" } }]), undefined);
+	assert.equal(sinceUserText([]), undefined);
+	const long = [{ type: "message", message: { role: "user", content: "u" } }, ...Array.from({ length: 20 }, () => ({ type: "message", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "y".repeat(400) }] } }))];
+	const since = sinceUserText(long) ?? "";
+	assert.equal(since.length, 2001);
+	assert.ok(since.startsWith("…"));
+});
+
+test("text after the user's message is redacted too", () => {
+	const input = redactInput({ command: "c", kind: "shell", reason: "r", since: "bash result: tok-123456", scripts: [] }, (text) => text.replaceAll("tok-123456", "[REDACTED]"));
+	assert.equal(input.since, "bash result: [REDACTED]");
 });

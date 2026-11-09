@@ -192,7 +192,7 @@ export class HandSelect implements Component, Focusable {
 		const picker = this.picker;
 		if (!picker) return [];
 		const list = this.listed();
-		const lines = [t.bold(t.fg("muted", "Check with which model?")), `${t.fg("accent", "› ")}${picker.filter ? t.fg("text", picker.filter) : t.fg("dim", "type to filter")}`];
+		const lines = [t.bold(t.fg("muted", "Check with which model?")), `${t.fg("muted", "Filter: ")}${picker.filter ? t.fg("text", picker.filter) : t.fg("dim", "type part of a name")}`];
 		if (this.props.models().length === 0) lines.push(...wrapTextWithAnsi(t.fg("warning", "No signed-in model; sign in with /login first."), inner));
 		else if (list.length === 0) lines.push(t.fg("dim", "  no model matches"));
 		const first = Math.max(0, Math.min(picker.cursor - Math.floor(MAX_LISTED / 2), list.length - MAX_LISTED));

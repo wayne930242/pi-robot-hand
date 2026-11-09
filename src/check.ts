@@ -38,6 +38,8 @@ export interface CheckInput {
 	kind: Kind;
 	reason: string;
 	userMessage?: string;
+	/** What happened after the user's last message: agent text and tool results, where later replies of the user can be. */
+	since?: string;
 	scripts: Script[];
 }
 
@@ -46,6 +48,8 @@ export type Complete = (model: Model<Api>, context: Context, options: { signal?:
 const MAX_SCRIPTS = 5;
 const MAX_SCRIPT_BYTES = 16_000;
 const MAX_USER_CHARS = 2_000;
+const MAX_SINCE_CHARS = 2_000;
+const MAX_SINCE_ITEM_CHARS = 500;
 const SCRIPT_EXTENSIONS = new Set([".sh", ".bash", ".zsh", ".fish", ".ksh", ".py", ".rb", ".pl", ".js", ".mjs", ".cjs", ".ts", ".mts", ".php", ".lua", ".ps1", ".sql", ".awk"]);
 
 export function modelRef(model: Pick<Model<Api>, "provider" | "id">): string {
@@ -110,6 +114,7 @@ export function redactInput(input: CheckInput, redact: (text: string) => string)
 		command: redact(input.command),
 		reason: redact(input.reason),
 		userMessage: input.userMessage === undefined ? undefined : redact(input.userMessage),
+		since: input.since === undefined ? undefined : redact(input.since),
 		scripts: input.scripts.map((script) => ({ ...script, text: redact(script.text) })),
 	};
 }
@@ -161,7 +166,49 @@ export function secretGuard(paths: Set<string>, secretDropDir: string): (canonic
 
 interface EntryLike {
 	type: string;
-	message?: { role?: string; content?: unknown };
+	message?: { role?: string; content?: unknown; toolName?: string };
+}
+
+function textOf(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content.map((part: { type?: string; text?: string }) => (part.type === "text" ? (part.text ?? "") : "")).join("\n");
+}
+
+function shorten(text: string, max: number): string {
+	return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function isUserMessage(entry: EntryLike | undefined): boolean {
+	return entry?.type === "message" && entry.message?.role === "user" && textOf(entry.message.content).trim() !== "";
+}
+
+/**
+ * What happened on this branch after the user's last message, latest last: the agent's text, the
+ * tools it called, and their results. A reply the user gave inside a tool (secret_drop, a question
+ * dialog) is only here. Keeps the most recent part when it is long.
+ */
+export function sinceUserText(entries: readonly EntryLike[]): string | undefined {
+	let start = entries.length;
+	while (start > 0 && !isUserMessage(entries[start - 1])) start--;
+	if (start === 0) return undefined;
+	const lines: string[] = [];
+	for (const entry of entries.slice(start)) {
+		const message = entry.message;
+		if (entry.type !== "message" || !message) continue;
+		if (message.role === "assistant" && Array.isArray(message.content)) {
+			for (const part of message.content as { type?: string; text?: string; name?: string }[]) {
+				if (part.type === "text" && part.text?.trim()) lines.push(`Agent: ${shorten(part.text.trim(), MAX_SINCE_ITEM_CHARS)}`);
+				else if (part.type === "toolCall" && part.name) lines.push(`Agent called ${part.name}`);
+			}
+		} else if (message.role === "toolResult") {
+			const text = textOf(message.content).trim();
+			if (text) lines.push(`${message.toolName ?? "tool"} result: ${shorten(text, MAX_SINCE_ITEM_CHARS)}`);
+		}
+	}
+	const text = lines.join("\n");
+	if (!text) return undefined;
+	return text.length > MAX_SINCE_CHARS ? `…${text.slice(-MAX_SINCE_CHARS)}` : text;
 }
 
 /** The text of the user's last message on this branch, shortened. */
@@ -191,7 +238,8 @@ const SYSTEM = [
 	"verdict: match when the command does what the reason says and nothing materially more; partial when it does that but also something the reason does not mention (deleting, overwriting, network access, sudo, touching credentials, deploying), or when the reason is too vague to judge; mismatch when it does something else or goes against the user's request.",
 	"does: one to three short sentences on what it will actually do, naming destructive or irreversible effects.",
 	"gaps: what differs from the stated intent and the user's request, or an empty string.",
-	"Write does and gaps in the language of the reason.",
+	"The user's request is their last message as updated by anything they said after it, such as a reply inside a tool result (a secret_drop reply, an answer to a question); a later reply wins.",
+	"Write does and gaps in the language of the user's last message, or of the reason when there is none.",
 ].join("\n");
 
 /** A code fence longer than any backtick run inside, so the text cannot close it. */
@@ -205,6 +253,7 @@ export function checkContext(input: CheckInput): Context {
 	const parts = [
 		`Reason the agent gave: ${input.reason}`,
 		input.userMessage ? `The user's last message:\n${input.userMessage}` : "The user's last message: (none)",
+		...(input.since ? [`What happened after that message, latest last:\n${input.since}`] : []),
 		`Command (${input.kind === "pi" ? "a pi slash command" : "a shell command"}):\n${fence(input.command)}`,
 		...input.scripts.map((script) => `Script ${script.path}${script.truncated ? ` (first ${MAX_SCRIPT_BYTES} bytes)` : ""}:\n${fence(script.text)}`),
 	];

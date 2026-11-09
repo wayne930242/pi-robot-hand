@@ -11,7 +11,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { copyToClipboard, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type CheckInput, type CheckResult, checkSummary, findScripts, lastUserText, loadCheckModel, loadSecrets, modelRef, redactInput, runCheck, saveCheckModel, settingsPath, type Verdict } from "./check.ts";
+import { type CheckInput, type CheckResult, checkSummary, findScripts, lastUserText, loadCheckModel, loadSecrets, modelRef, redactInput, runCheck, saveCheckModel, settingsPath, sinceUserText, type Verdict } from "./check.ts";
 import { openDialog } from "./dialog.ts";
 import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, resultText, toOffer } from "./hand.ts";
 import { HandSelect } from "./hand-select.ts";
@@ -55,7 +55,8 @@ const Params = Type.Object({
 async function checkInput(offer: Offer, reason: string, ctx: ExtensionContext, agentDir: string): Promise<CheckInput> {
 	const secrets = await loadSecrets(join(agentDir, "secret-drop"));
 	const scripts = offer.kind === "shell" ? await findScripts(offer.command, ctx.cwd, secrets.isSecret) : [];
-	return redactInput({ command: offer.command, kind: offer.kind, reason, userMessage: lastUserText(ctx.sessionManager.getBranch()), scripts }, secrets.redact);
+	const branch = ctx.sessionManager.getBranch();
+	return redactInput({ command: offer.command, kind: offer.kind, reason, userMessage: lastUserText(branch), since: sinceUserText(branch), scripts }, secrets.redact);
 }
 
 export function createRobotHand(
