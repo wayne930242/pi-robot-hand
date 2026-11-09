@@ -74,3 +74,42 @@ export class Redactor {
 		return node;
 	}
 }
+
+/**
+ * The bus channel on which secret_drop redacts text for other extensions in the process, with the
+ * values it holds this session (including ones fed to a command, which no registry records). The
+ * payload is `{ version: 1, text, reply }`; the handler calls `reply` with the redacted text during
+ * `emit`, so no value ever travels on the bus.
+ */
+export const REDACT_CHANNEL = "secret-drop:redact";
+
+interface Bus {
+	emit(channel: string, data: unknown): void;
+	on(channel: string, handler: (data: unknown) => void): () => void;
+}
+
+/** secret_drop's side: answer redaction requests with its own redactor. */
+export function serveRedaction(events: Bus, redactor: Redactor): () => void {
+	return events.on(REDACT_CHANNEL, (data) => {
+		const request = data as { version?: unknown; text?: unknown; reply?: unknown } | null;
+		if (request?.version !== 1 || typeof request.text !== "string" || typeof request.reply !== "function") return;
+		(request.reply as (text: string) => void)(redactor.redactText(request.text));
+	});
+}
+
+/**
+ * The asking side: the text as secret_drop redacts it, or unchanged when secret_drop is not loaded.
+ * `text` always reads the latest reply, so every responder redacts what the earlier ones returned
+ * and none can hand back the unredacted text.
+ */
+export function redactThrough(events: Bus, text: string): string {
+	let out = text;
+	events.emit(REDACT_CHANNEL, {
+		version: 1,
+		get text() {
+			return out;
+		},
+		reply: (redacted: string) => (out = redacted),
+	});
+	return out;
+}

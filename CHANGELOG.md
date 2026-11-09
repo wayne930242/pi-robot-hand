@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.5
+
+- The `e` check also redacts secrets the user gave `secret_drop` with `format: "command"`. Those reach no file, so no registry records them; `secret_drop` now answers `secret-drop:redact` requests on pi's event bus with its in-session redactor, and the check runs every text through it as well as through the registry. The value never travels on the bus; when several extensions answer, each redacts what the earlier ones returned.
+- `/secret-drop forget` no longer drops values fed to a command from redaction for the rest of the session; before, any `forget` unmasked them in the main model's context too.
+
 ## 0.5.4
 
 - A reply typed into `secret_drop` goes to the checker as the sentence the user typed, not as the tool's whole record; its other statuses are left out. In a live test the record's agent-written command and target buried the reply, and the checker judged a command that followed it a mismatch.

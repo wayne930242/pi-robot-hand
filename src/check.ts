@@ -113,10 +113,11 @@ export interface Secrets {
 }
 
 /**
- * Loads secret_drop's registry and the values in its files, as secret_drop itself does. A missing
+ * Loads secret_drop's registry and the values in its files, as secret_drop itself does, and adds
+ * `sessionRedact`: secret_drop's own redaction, which also knows values fed to a command this session. A missing
  * registry protects nothing; an unreadable or unknown one fails the check, so nothing is sent.
  */
-export async function loadSecrets(secretDropDir: string): Promise<Secrets> {
+export async function loadSecrets(secretDropDir: string, sessionRedact: Redact = keep): Promise<Secrets> {
 	const registry = new Registry(join(secretDropDir, "registry.json"));
 	try {
 		await registry.load();
@@ -130,7 +131,7 @@ export async function loadSecrets(secretDropDir: string): Promise<Secrets> {
 		const secret = extractSecret(content, entry.placement);
 		if (secret) redactor.add(secret);
 	}
-	return { isSecret: secretGuard(registry.paths(), secretDropDir), redact: (text) => redactor.redactText(text) };
+	return { isSecret: secretGuard(registry.paths(), secretDropDir), redact: (text) => sessionRedact(redactor.redactText(text)) };
 }
 
 /** The check input with every known secret value replaced, as the main model would see it. */

@@ -15,7 +15,7 @@ import { checkOverwrite, checkValue, describePlacement, extractSecret, type Plac
 import { parseFileMode, readExisting } from "../../lib/write.ts";
 import { canonicalPath, checkToolCall } from "./guard.ts";
 import { findLegacySecretDrop, legacyNotice } from "./legacy.ts";
-import { Redactor } from "./redact.ts";
+import { Redactor, serveRedaction } from "./redact.ts";
 import { Registry } from "./registry.ts";
 import { type DialogResult, dialogOptions, SecretInput } from "./secret-input.ts";
 import {
@@ -149,6 +149,9 @@ export default function secretDrop(pi: ExtensionAPI) {
 	const stagingDir = join(home, "staging");
 	const registry = new Registry(join(home, "registry.json"));
 	const redactor = new Redactor();
+	// Values fed to a command reach no file, so no registry entry brings them back after a clear.
+	const commandValues = new Set<string>();
+	serveRedaction(pi.events, redactor);
 
 	const isProtected = (path: string): boolean => {
 		const staging = canonicalPath(stagingDir, "/");
@@ -269,6 +272,7 @@ export default function secretDrop(pi: ExtensionAPI) {
 				const value = choice.value;
 
 				redactor.add(value);
+				if (plan.format === "exec") commandValues.add(value);
 				await stageSecret(staged, value, stagingDir);
 				draft = ctx.ui.getEditorText();
 				ctx.ui.setEditorText(command);
@@ -344,6 +348,7 @@ export default function secretDrop(pi: ExtensionAPI) {
 				}
 				const removed = await registry.forget(canonicalPath(target, ctx.cwd));
 				redactor.clear();
+				for (const value of commandValues) redactor.add(value);
 				await reloadSecrets();
 				ctx.ui.notify(removed > 0 ? `No longer protecting ${target}` : `${target} is not protected`, "info");
 				return;

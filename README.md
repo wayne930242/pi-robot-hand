@@ -45,7 +45,7 @@ Not sure what the command does? Press `e` in the selector and another model read
 
 The first `e` asks which signed-in model to use and remembers it in `~/.pi/agent/robot-hand.json`; after a failed check, `e` asks again, and `E` always does.
 The list shows every model of each provider pi holds a credential for, even an expired one; the provider you are using comes first, and a provider whose check failed is marked and moved to the end.
-Known `secret_drop` values are replaced with `[REDACTED]` before anything is sent; when its registry cannot be read, the check fails and sends nothing. The check informs your choice and never blocks one. When you checked, the agent's result says which model checked and its verdict.
+Known `secret_drop` values, both those in files it wrote and those fed to a command this session, are replaced with `[REDACTED]` before anything is sent; when its registry cannot be read, the check fails and sends nothing. The check informs your choice and never blocks one. When you checked, the agent's result says which model checked and its verdict.
 It needs the terminal UI.
 
 The agent sets `default` to choose which option the selector starts on, and picks the Herdr pane for commands that need terminal input.
@@ -92,7 +92,7 @@ An answer for this dialog's `id` is refused whole unless its `version`, `answerI
 
 When an accepted answer picks one of the two Herdr pane choices, `robot_hand` marks the pane it just opened so the answerer can tell which pane is the owner's: right after `herdr pane split` and before anything is typed or run there, it runs `herdr pane report-metadata <pane_id> --source robot-hand --token sb_answer=<answerId> --ttl-ms 600000`. The value is exactly the answer's `answerId`. [Straw Boss](https://github.com/wayne930242/pi-straw-boss) grants its terminal keys only to the pane that carries it. The tag is set once, with no retry; if it fails, the command still runs and the answerer grants no pane. A pick in the terminal, and answers for the other choices, tag nothing.
 
-Any extension in the pi process can read dialog ids from the bus and answer. That adds no authority: such an extension could already run commands itself, so there is no opt-in setting. `secret_drop` never publishes anything and can only be answered in the terminal.
+Any extension in the pi process can read dialog ids from the bus and answer. That adds no authority: such an extension could already run commands itself, so there is no opt-in setting. `secret_drop` never publishes a dialog and can only be answered in the terminal. It does serve one bus request, `secret-drop:redact`: an extension emits `{ version: 1, text, reply }` and `secret_drop` calls `reply` during the emit with the text redacted by every value it knows this session, so values never travel on the bus. The `e` check uses it.
 
 ## Safety
 

@@ -15,6 +15,7 @@ import { type CheckInput, type CheckResult, afterUserMessage, checkSummary, fail
 import { openDialog } from "./dialog.ts";
 import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, resultText, toOffer } from "./hand.ts";
 import { HandSelect } from "./hand-select.ts";
+import { redactThrough } from "./secret-drop/redact.ts";
 import { dialogOptions } from "./secret-drop/secret-input.ts";
 import { checkRun, cleanup, type Exec, findShell, type HerdrRun, outcomeText, startRun } from "./herdr.ts";
 
@@ -52,9 +53,9 @@ const Params = Type.Object({
 });
 
 /** What the check reads, gathered once per hand-over on the first `e`. */
-async function checkInput(offer: Offer, reason: string, ctx: ExtensionContext, agentDir: string): Promise<CheckInput> {
+async function checkInput(offer: Offer, reason: string, ctx: ExtensionContext, agentDir: string, events: ExtensionAPI["events"]): Promise<CheckInput> {
 	const dialogTools = loadDialogTools(settingsPath(agentDir));
-	const secrets = await loadSecrets(join(agentDir, "secret-drop"));
+	const secrets = await loadSecrets(join(agentDir, "secret-drop"), (text) => redactThrough(events, text));
 	const scripts = offer.kind === "shell" ? await findScripts(offer.command, ctx.cwd, secrets.isSecret, secrets.redact) : [];
 	const branch = ctx.sessionManager.getBranch();
 	const after = afterUserMessage(branch, secrets.redact, dialogTools);
@@ -149,7 +150,7 @@ export function createRobotHand(
 							check: async (ref, signal) => {
 								const model = ctx.modelRegistry.getAvailable().find((candidate) => modelRef(candidate) === ref);
 								if (!model) throw new Error("it is no longer signed in");
-								input ??= checkInput(offer, reason, ctx, agentDir);
+								input ??= checkInput(offer, reason, ctx, agentDir, pi.events);
 								const gathered = await input.catch((error: unknown) => {
 									input = undefined;
 									throw error;
