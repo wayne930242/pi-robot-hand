@@ -38,6 +38,7 @@ async function run(
 		models: { provider: string; id: string }[];
 		complete: (model: { provider: string; id: string }, context: Context) => Promise<Partial<AssistantMessage>>;
 		branch: unknown[];
+		current: string;
 		// Runs against the terminal selector before the pick, e.g. pressing `e`.
 		drive: (select: HandSelect) => Promise<void>;
 	}> = {},
@@ -69,6 +70,7 @@ async function run(
 		hasUI: setup.hasUI ?? true,
 		mode: setup.mode ?? "tui",
 		cwd: setup.cwd ?? "/repo",
+		model: setup.current ? { provider: setup.current, id: "main" } : undefined,
 		modelRegistry: {
 			getAvailable: () => setup.models ?? [],
 			complete: async (model: { provider: string; id: string }, context: Context) => ({ stopReason: "stop", content: [], ...(await setup.complete?.(model, context)) }),
@@ -297,4 +299,39 @@ test("a saved model that is no longer signed in sends e to the list", async () =
 			assert.match(select.render(100).join("\n"), /Check with which model\?/);
 		},
 	});
+});
+
+test("a provider whose check failed is marked and listed last; the current provider leads", async () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "robot-hand-agent-"));
+	const models = [{ provider: "anthropic", id: "haiku" }, { provider: "google", id: "flash" }, { provider: "openai", id: "luna" }];
+	const listed: string[][] = [];
+	const setup = {
+		agentDir,
+		current: "openai",
+		models,
+		complete: async (model: { provider: string }) =>
+			model.provider === "anthropic" ? { stopReason: "error" as const, errorMessage: "OAuth refresh failed for anthropic" } : answer('{"verdict":"match","does":"ok","gaps":""}')(),
+	};
+	const pickerList = (select: HandSelect) =>
+		select
+			.render(100)
+			.join("\n")
+			.split("\n")
+			.map((line) => line.match(/(anthropic|google|openai)\/\w+.*?(?=\s*│)/)?.[0])
+			.filter((line): line is string => Boolean(line));
+	await run({ command: "ls", reason: "x" }, undefined, {
+		...setup,
+		drive: async (select) => {
+			select.handleInput("e");
+			listed.push(pickerList(select));
+			select.handleInput("\x1b[B");
+			select.handleInput("\r");
+			await until(select, /could not check/);
+			select.handleInput("e");
+			listed.push(pickerList(select));
+			select.handleInput("\x1b");
+		},
+	});
+	assert.deepEqual(listed[0], ["openai/luna", "anthropic/haiku", "google/flash"]);
+	assert.deepEqual(listed[1], ["openai/luna", "google/flash", "anthropic/haiku (saved, sign-in failed)"]);
 });

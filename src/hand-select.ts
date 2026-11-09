@@ -12,8 +12,10 @@ export interface HandSelectProps {
 	/** The same title the plain selector shows: the reason, a blank line, then the command. */
 	title: string;
 	labels: readonly string[];
-	/** `provider/id` of every signed-in model. */
+	/** `provider/id` of every signed-in model, in the order to list them. */
 	models: () => string[];
+	/** A dim note after a model in the list, such as a failed sign-in. */
+	note?: (model: string) => string | undefined;
 	/** The saved check model. */
 	saved: () => string | undefined;
 	/** Remembers the model the user picked. */
@@ -198,8 +200,9 @@ export class HandSelect implements Component, Focusable {
 		const first = Math.max(0, Math.min(picker.cursor - Math.floor(MAX_LISTED / 2), list.length - MAX_LISTED));
 		list.slice(first, first + MAX_LISTED).forEach((model, i) => {
 			const at = first + i === picker.cursor;
-			const saved = model === this.props.saved() ? t.fg("dim", " (saved)") : "";
-			lines.push(`${at ? t.fg("accent", "› ") : "  "}${t.fg(at ? "accent" : "text", model)}${saved}`);
+			const notes = [model === this.props.saved() ? "saved" : undefined, this.props.note?.(model)].filter(Boolean);
+			const suffix = notes.length > 0 ? t.fg("dim", ` (${notes.join(", ")})`) : "";
+			lines.push(`${at ? t.fg("accent", "› ") : "  "}${t.fg(at ? "accent" : "text", model)}${suffix}`);
 		});
 		if (list.length > MAX_LISTED) lines.push(t.fg("dim", `  ${list.length} models; type to narrow`));
 		return lines;

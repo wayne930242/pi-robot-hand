@@ -64,6 +64,22 @@ export function modelRef(model: Pick<Model<Api>, "provider" | "id">): string {
 }
 
 /**
+ * The model list for the picker. pi counts a provider as available when it has a stored credential,
+ * even an expired one, so the provider pi is using now goes first and a provider whose check failed
+ * this session goes last; the rest keep pi's order.
+ */
+export function orderModels(refs: readonly string[], current: string | undefined, failed: ReadonlyMap<string, string>): string[] {
+	const provider = (ref: string) => ref.slice(0, ref.indexOf("/"));
+	const rank = (ref: string) => (failed.has(provider(ref)) ? 2 : provider(ref) === current ? 0 : 1);
+	return refs.map((ref, i) => ({ ref, i })).sort((a, b) => rank(a.ref) - rank(b.ref) || a.i - b.i).map(({ ref }) => ref);
+}
+
+/** How the picker marks a provider whose check failed: sign-in trouble, or any other failure. */
+export function failureNote(error: string): string {
+	return /oauth|auth|unauthori[sz]ed|forbidden|\b40[13]\b|api key|token|credential|login/i.test(error) ? "sign-in failed" : "check failed";
+}
+
+/**
  * The saved check model, or undefined when none was picked yet or the file is unreadable. Read
  * synchronously so the selector opens in the same tick as before the check existed.
  */

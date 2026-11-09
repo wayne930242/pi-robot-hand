@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+- The check's model list puts the provider pi is using now first. pi lists every model of a provider that has a stored credential, even an expired one, so a provider whose check failed is marked `(sign-in failed)` or `(check failed)` and moved to the end for the rest of the session; a successful check clears the mark. The filter line reads `Filter:`.
+
 ## 0.5.1
 
 - The `e` check reads a reply the user typed into `secret_drop`'s dialog from the tool's details, not its text, and lists it as the user's; the rest of what happened after the user's last message goes to the checker fenced and marked untrusted, and cannot change the user's request. Before, tool output could imitate a user reply and turn a mismatch into a match.

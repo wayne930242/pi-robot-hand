@@ -11,7 +11,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { copyToClipboard, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type CheckInput, type CheckResult, afterUserMessage, checkSummary, findScripts, lastUserText, loadCheckModel, loadSecrets, modelRef, redactInput, runCheck, saveCheckModel, settingsPath, type Verdict } from "./check.ts";
+import { type CheckInput, type CheckResult, afterUserMessage, checkSummary, failureNote, findScripts, lastUserText, loadCheckModel, loadSecrets, modelRef, orderModels, redactInput, runCheck, saveCheckModel, settingsPath, type Verdict } from "./check.ts";
 import { openDialog } from "./dialog.ts";
 import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, resultText, toOffer } from "./hand.ts";
 import { HandSelect } from "./hand-select.ts";
@@ -108,7 +108,11 @@ export function createRobotHand(
 			}
 		};
 
+		// Providers whose check failed in this session, with the note the picker shows.
+		const failedProviders = new Map<string, string>();
+
 		pi.on("session_shutdown", () => {
+			failedProviders.clear();
 			if (timer) clearInterval(timer);
 			timer = undefined;
 			runs.clear();
@@ -134,7 +138,8 @@ export function createRobotHand(
 						{
 							title,
 							labels,
-							models: () => ctx.modelRegistry.getAvailable().map(modelRef),
+							models: () => orderModels(ctx.modelRegistry.getAvailable().map(modelRef), ctx.model?.provider, failedProviders),
+							note: (ref) => failedProviders.get(ref.slice(0, ref.indexOf("/"))),
 							saved: () => saved,
 							pick: (model) => {
 								saved = model;
@@ -148,7 +153,14 @@ export function createRobotHand(
 									input = undefined;
 									throw error;
 								});
-								return runCheck((m, context, options) => ctx.modelRegistry.complete(m, context, options), model, gathered, signal);
+								try {
+									const result = await runCheck((m, context, options) => ctx.modelRegistry.complete(m, context, options), model, gathered, signal);
+									failedProviders.delete(model.provider);
+									return result;
+								} catch (error) {
+									if (!signal.aborted) failedProviders.set(model.provider, failureNote((error as Error).message));
+									throw error;
+								}
 							},
 						},
 						theme,

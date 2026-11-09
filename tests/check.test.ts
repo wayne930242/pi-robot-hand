@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkContext, findScripts, lastUserText, loadSecrets, parseCheck, redactInput, afterUserMessage } from "../src/check.ts";
+import { checkContext, failureNote, findScripts, orderModels, lastUserText, loadSecrets, parseCheck, redactInput, afterUserMessage } from "../src/check.ts";
 
 test("scripts the command runs are read; secret files, plain files, and binaries are not", async () => {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "robot-hand-check-")));
@@ -139,4 +139,14 @@ test("text after the user's message is redacted too", () => {
 	const input = redactInput({ command: "c", kind: "shell", reason: "r", replies: ["tok-123456"], since: "bash result: tok-123456", scripts: [] }, (text) => text.replaceAll("tok-123456", "[REDACTED]"));
 	assert.equal(input.since, "bash result: [REDACTED]");
 	assert.deepEqual(input.replies, ["[REDACTED]"]);
+});
+
+test("the picker lists the current provider first and providers that failed this session last", () => {
+	const refs = ["anthropic/a", "openai/b", "google/c", "openai/d", "anthropic/e"];
+	assert.deepEqual(orderModels(refs, "openai", new Map()), ["openai/b", "openai/d", "anthropic/a", "google/c", "anthropic/e"]);
+	assert.deepEqual(orderModels(refs, "openai", new Map([["anthropic", "sign-in failed"]])), ["openai/b", "openai/d", "google/c", "anthropic/a", "anthropic/e"]);
+	assert.deepEqual(orderModels(refs, undefined, new Map()), refs);
+	assert.equal(failureNote("OAuth refresh failed for anthropic: Anthropic token refresh request failed."), "sign-in failed");
+	assert.equal(failureNote("401 Unauthorized"), "sign-in failed");
+	assert.equal(failureNote("socket hang up"), "check failed");
 });

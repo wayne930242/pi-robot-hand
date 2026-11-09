@@ -44,6 +44,7 @@ Not sure what the command does? Press `e` in the selector and another model read
 ```
 
 The first `e` asks which signed-in model to use and remembers it in `~/.pi/agent/robot-hand.json`; after a failed check, `e` asks again, and `E` always does.
+The list shows every model of each provider pi holds a credential for, even an expired one; the provider you are using comes first, and a provider whose check failed is marked and moved to the end.
 Known `secret_drop` values are replaced with `[REDACTED]` before anything is sent; when its registry cannot be read, the check fails and sends nothing. The check informs your choice and never blocks one. When you checked, the agent's result says which model checked and its verdict.
 It needs the terminal UI.
 
