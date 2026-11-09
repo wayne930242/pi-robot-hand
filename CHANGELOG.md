@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.4
+
+- A reply typed into `secret_drop` goes to the checker as the sentence the user typed, not as the tool's whole record; its other statuses are left out. In a live test the record's agent-written command and target buried the reply, and the checker judged a command that followed it a mismatch.
+- The checker is told that a later answer that changes how the user wants something done replaces the earlier way, and that handing a command over keeps a request that the agent run nothing itself.
+
 ## 0.5.3
 
 - The `e` check counts answers given in dialog tools as the user's, not only `secret_drop` replies: `ask_user_question` and `ask_user` are built in, and `dialogTools` (a list of tool names) in `~/.pi/agent/robot-hand.json` adds more. A dialog tool's details go to the checker whole, without parsing its format; each string field is redacted first and cut to 300 characters (start and end), the record to 1,500, and all answers to the latest 6,000. The checker is told that only what the user typed or picked is theirs; questions, option labels, previews, commands, and reports were written by the agent or the tool. Other tools' details stay out.
