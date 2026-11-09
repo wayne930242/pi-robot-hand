@@ -97,7 +97,7 @@ export function replyResult(text: string): string {
 	return [
 		`The user did not enter the secret and replied instead: "${text}". Nothing was staged.`,
 		"If they asked a question, answer it in chat, then call secret_drop again when they are ready.",
-		"If they said the secret is already stored somewhere, or is not needed, do not call secret_drop again for it: point the program at that location without reading or printing the value, and ask the user when the location is unclear.",
+		"If they said the secret is already stored somewhere, or is not needed, do not call secret_drop again for it: point the program at that location without reading or printing the value, and ask the user when the location is unclear. secret_drop does not guard that location: reads of it are not blocked and its value is not redacted, so keeping it out of the conversation is on you.",
 	].join(" ");
 }
 

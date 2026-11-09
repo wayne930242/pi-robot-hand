@@ -18,8 +18,8 @@ export interface HandSelectProps {
 	saved: () => string | undefined;
 	/** Remembers the model the user picked. */
 	pick: (model: string) => void;
-	/** Checks the command with a model; rejects with a message the user can act on. */
-	check: (model: string) => Promise<CheckResult>;
+	/** Checks the command with a model; rejects with a message the user can act on. Aborted when superseded or closed. */
+	check: (model: string, signal: AbortSignal) => Promise<CheckResult>;
 	/** Lines the selector may take; the command and check give way first. Default: 85% of the terminal. */
 	maxLines?: () => number;
 }
@@ -44,7 +44,7 @@ export class HandSelect implements Component, Focusable {
 	private state: State = { kind: "idle" };
 	private picker: { filter: string; cursor: number } | undefined;
 	private closed = false;
-	private run = 0;
+	private running: AbortController | undefined;
 
 	readonly props: HandSelectProps;
 	private readonly theme: Theme;
@@ -71,6 +71,7 @@ export class HandSelect implements Component, Focusable {
 	private finish(index: number | undefined): void {
 		if (this.closed) return;
 		this.closed = true;
+		this.running?.abort();
 		this.done(index);
 	}
 
@@ -86,16 +87,18 @@ export class HandSelect implements Component, Focusable {
 	}
 
 	private startCheck(model: string): void {
-		const run = ++this.run;
+		this.running?.abort();
+		const run = new AbortController();
+		this.running = run;
 		this.state = { kind: "checking", model };
-		this.props.check(model).then(
+		this.props.check(model, run.signal).then(
 			(result) => {
-				if (this.closed || run !== this.run) return;
+				if (this.closed || run !== this.running) return;
 				this.state = { kind: "done", result };
 				this.requestRender();
 			},
 			(error: unknown) => {
-				if (this.closed || run !== this.run) return;
+				if (this.closed || run !== this.running) return;
 				this.state = { kind: "failed", model, error: error instanceof Error ? error.message : String(error) };
 				this.requestRender();
 			},
@@ -147,10 +150,11 @@ export class HandSelect implements Component, Focusable {
 			this.finish(this.cursor);
 			return;
 		}
-		if (kb.matches(data, "tui.select.up")) {
-			this.cursor = (this.cursor - 1 + count) % count;
-		} else if (kb.matches(data, "tui.select.down")) {
-			this.cursor = (this.cursor + 1) % count;
+		// Like pi's selector: j and k move too, and the cursor stops at the ends.
+		if (kb.matches(data, "tui.select.up") || data === "k") {
+			this.cursor = Math.max(0, this.cursor - 1);
+		} else if (kb.matches(data, "tui.select.down") || data === "j") {
+			this.cursor = Math.min(count - 1, this.cursor + 1);
 		} else if (data === "E" || matchesKey(data, "shift+e")) {
 			this.openPicker();
 		} else if (data === "e" || matchesKey(data, "e")) {

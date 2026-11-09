@@ -21,7 +21,7 @@ Secrets reach files and commands through the `secret_drop` tool, so the value ne
      - `kubectl create secret generic app-tls --from-file=tls.key={secret}`
 4. Call it once per secret and wait for the result:
    - **Applied**: the report states the change and `length check passed (N chars)`. That report is the verification; the value is in place.
-   - **Reply**: the user pressed Tab and replied instead; nothing was staged. A question: answer it, then call `secret_drop` again. A note that the secret is already stored somewhere or is not needed: do not call `secret_drop` again for it; point the program at that location without reading or printing the value, and ask when the location is unclear.
+   - **Reply**: the user pressed Tab and replied instead; nothing was staged. A question: answer it, then call `secret_drop` again. A note that the secret is already stored somewhere or is not needed: do not call `secret_drop` again for it; point the program at that location without reading or printing the value, and ask when the location is unclear. That location is not guarded like a `secret_drop` destination, so no block or redaction catches a slip.
    - **Cancelled or aborted**: nothing was applied. Ask the user how to proceed; have the user revoke a token created on a prepared page that was not applied.
    - **Apply failed**: the staged value was discarded. Fix the parameters from the error (a regex that does not match, a failing command) and call again.
 

@@ -11,7 +11,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { copyToClipboard, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type CheckInput, type CheckResult, checkSummary, findScripts, lastUserText, loadCheckModel, modelRef, protectedPaths, runCheck, saveCheckModel, secretGuard, settingsPath, type Verdict } from "./check.ts";
+import { type CheckInput, type CheckResult, checkSummary, findScripts, lastUserText, loadCheckModel, loadSecrets, modelRef, redactInput, runCheck, saveCheckModel, settingsPath, type Verdict } from "./check.ts";
 import { openDialog } from "./dialog.ts";
 import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, resultText, toOffer } from "./hand.ts";
 import { HandSelect } from "./hand-select.ts";
@@ -53,10 +53,9 @@ const Params = Type.Object({
 
 /** What the check reads, gathered once per hand-over on the first `e`. */
 async function checkInput(offer: Offer, reason: string, ctx: ExtensionContext, agentDir: string): Promise<CheckInput> {
-	const secretDrop = join(agentDir, "secret-drop");
-	const isSecret = secretGuard(await protectedPaths(join(secretDrop, "registry.json")), secretDrop);
-	const scripts = offer.kind === "shell" ? await findScripts(offer.command, ctx.cwd, isSecret) : [];
-	return { command: offer.command, kind: offer.kind, reason, userMessage: lastUserText(ctx.sessionManager.getBranch()), scripts };
+	const secrets = await loadSecrets(join(agentDir, "secret-drop"));
+	const scripts = offer.kind === "shell" ? await findScripts(offer.command, ctx.cwd, secrets.isSecret) : [];
+	return redactInput({ command: offer.command, kind: offer.kind, reason, userMessage: lastUserText(ctx.sessionManager.getBranch()), scripts }, secrets.redact);
 }
 
 export function createRobotHand(
@@ -122,7 +121,6 @@ export function createRobotHand(
 		): Promise<{ index: number | undefined; check?: CheckResult }> => {
 			const settings = settingsPath(agentDir);
 			let saved = loadCheckModel(settings);
-			const checks = new AbortController();
 			let input: Promise<CheckInput> | undefined;
 			let select: HandSelect | undefined;
 			try {
@@ -137,11 +135,15 @@ export function createRobotHand(
 								saved = model;
 								saveCheckModel(settings, model).catch((error: unknown) => ctx.ui.notify(`robot_hand could not save the check model: ${(error as Error).message}`, "warning"));
 							},
-							check: async (ref) => {
+							check: async (ref, signal) => {
 								const model = ctx.modelRegistry.getAvailable().find((candidate) => modelRef(candidate) === ref);
 								if (!model) throw new Error("it is no longer signed in");
 								input ??= checkInput(offer, reason, ctx, agentDir);
-								return runCheck((m, context, options) => ctx.modelRegistry.complete(m, context, options), model, await input, checks.signal);
+								const gathered = await input.catch((error: unknown) => {
+									input = undefined;
+									throw error;
+								});
+								return runCheck((m, context, options) => ctx.modelRegistry.complete(m, context, options), model, gathered, signal);
 							},
 						},
 						theme,
@@ -154,7 +156,7 @@ export function createRobotHand(
 				}, dialogOptions());
 				return { index, check: select?.result };
 			} finally {
-				checks.abort();
+				select?.cancel();
 			}
 		};
 

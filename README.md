@@ -44,7 +44,7 @@ Not sure what the command does? Press `e` in the selector and another model read
 ```
 
 The first `e` asks which signed-in model to use and remembers it in `~/.pi/agent/robot-hand.json`; after a failed check, `e` asks again, and `E` always does.
-The check informs your choice and never blocks one. When you checked, the agent's result says which model checked and its verdict.
+Known `secret_drop` values are replaced with `[REDACTED]` before anything is sent; when its registry cannot be read, the check fails and sends nothing. The check informs your choice and never blocks one. When you checked, the agent's result says which model checked and its verdict.
 It needs the terminal UI.
 
 The agent sets `default` to choose which option the selector starts on, and picks the Herdr pane for commands that need terminal input.
@@ -60,7 +60,7 @@ With pi-robot-hand, the agent answers as soon as the command finishes.
 ## `secret_drop`
 
 1. The agent calls `secret_drop` with where the secret goes and the steps to get it.
-2. You type or paste the secret into a masked dialog, or press Tab to reply to the agent instead: a question, or a note such as "it is already in `~/.config/gh/hosts.yml`". After a note, the agent uses that location without reading the value and does not ask again.
+2. You type or paste the secret into a masked dialog, or press Tab to reply to the agent instead: a question, or a note such as "it is already in `~/.config/gh/hosts.yml`". After a note, the agent is told to use that location without reading the value and not to ask again. Unlike a destination `secret_drop` wrote, that location is not guarded: reading it is not blocked and its value is not redacted.
 3. Your prompt now holds a `!` command that applies it. Press Enter:
 
    ```

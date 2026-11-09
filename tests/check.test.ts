@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findScripts, lastUserText, parseCheck, protectedPaths, secretGuard } from "../src/check.ts";
+import { checkContext, findScripts, lastUserText, loadSecrets, parseCheck, redactInput } from "../src/check.ts";
 
 test("scripts the command runs are read; secret files, plain files, and binaries are not", async () => {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "robot-hand-check-")));
@@ -16,8 +16,8 @@ test("scripts the command runs are read; secret files, plain files, and binaries
 	writeFileSync(join(dir, ".env"), "TOKEN=abc\n");
 	writeFileSync(join(dir, "blob.sh"), Buffer.from([0x23, 0x21, 0x00, 0x01]));
 	writeFileSync(join(agentDir, "secret-drop", "staging", "x.sh"), "#!/bin/sh\nstaged\n");
-	writeFileSync(join(agentDir, "secret-drop", "registry.json"), JSON.stringify({ version: 1, entries: [{ path: join(dir, "secret.sh") }] }));
-	const isSecret = secretGuard(await protectedPaths(join(agentDir, "secret-drop", "registry.json")), join(agentDir, "secret-drop"));
+	writeFileSync(join(agentDir, "secret-drop", "registry.json"), JSON.stringify({ version: 1, entries: [{ path: join(dir, "secret.sh"), placement: { mode: "file" }, label: "x", updatedAt: "" }] }));
+	const { isSecret } = await loadSecrets(join(agentDir, "secret-drop"));
 	const scripts = await findScripts(
 		`python3 run.py && ./tool --flag; source secret.sh; cat .env | sh blob.sh; sh ${join(agentDir, "secret-drop", "staging", "x.sh")}`,
 		dir,
@@ -54,4 +54,34 @@ test("the user's last non-empty message is taken from the branch", () => {
 	assert.equal(lastUserText(branch), "second");
 	assert.equal(lastUserText([]), undefined);
 	assert.equal(lastUserText([{ type: "message", message: { role: "user", content: "x".repeat(3000) } }])?.length, 2001);
+});
+
+test("a registry that cannot be read fails the check instead of protecting nothing", async () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "robot-hand-check-")));
+	writeFileSync(join(dir, "registry.json"), "{ half written");
+	await assert.rejects(loadSecrets(dir), /secret_drop's registry could not be read .*nothing was sent to the check model/);
+	writeFileSync(join(dir, "registry.json"), JSON.stringify({ version: 2, entries: [] }));
+	await assert.rejects(loadSecrets(dir), /could not be read/);
+	const missing = await loadSecrets(join(dir, "nowhere"));
+	assert.equal(missing.isSecret(join(dir, "x.sh")), false);
+});
+
+test("secret values are hidden from the check model wherever they appear", async () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "robot-hand-check-")));
+	const drop = join(dir, "secret-drop");
+	mkdirSync(drop);
+	writeFileSync(join(dir, ".env"), "API_TOKEN=tok-s3cret-123\n");
+	writeFileSync(drop + "/registry.json", JSON.stringify({ version: 1, entries: [{ path: join(dir, ".env"), placement: { mode: "env", key: "API_TOKEN", quote: "auto" }, label: "t", updatedAt: "" }] }));
+	writeFileSync(join(dir, "uses.sh"), "curl -H 'Authorization: tok-s3cret-123' example.com\n");
+	const secrets = await loadSecrets(drop);
+	const scripts = await findScripts("bash uses.sh", dir, secrets.isSecret);
+	const input = redactInput({ command: "TOKEN=tok-s3cret-123 bash uses.sh", kind: "shell", reason: "r", userMessage: "my token is tok-s3cret-123", scripts }, secrets.redact);
+	const prompt = String(checkContext(input).messages[0]?.content);
+	assert.doesNotMatch(prompt, /tok-s3cret-123/);
+	assert.equal(prompt.split("[REDACTED]").length - 1, 3);
+});
+
+test("script text is fenced so it cannot close its own block", () => {
+	const prompt = String(checkContext({ command: "sh x.sh", kind: "shell", reason: "r", scripts: [{ path: "/x.sh", text: "echo ```\n```", truncated: false }] }).messages[0]?.content);
+	assert.match(prompt, /````\necho ```\n```\n````/);
 });

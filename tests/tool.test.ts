@@ -195,7 +195,15 @@ test("a Herdr run opens a pane, ends the turn, and brings the agent back with th
 	assert.deepEqual(readdirSync(join(tmp, "pi-robot-hand")), [], "the run's files are removed");
 });
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+// Waits until the selector shows `pattern`; the check gathers its input asynchronously.
+async function until(select: HandSelect, pattern: RegExp): Promise<string> {
+	for (let i = 0; i < 200; i++) {
+		const screen = select.render(100).join("\n");
+		if (pattern.test(screen)) return screen;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assert.fail(`never showed ${pattern}:\n${select.render(100).join("\n")}`);
+}
 const answer = (text: string) => async () => ({ content: [{ type: "text" as const, text }] });
 
 test("the first e asks for a model, checks the command with its scripts and the user's message, and remembers the model", async () => {
@@ -220,8 +228,7 @@ test("the first e asks for a model, checks the command with its scripts and the 
 			assert.match(select.render(100).join("\n"), /Check with which model\?/);
 			select.handleInput("\x1b[B");
 			select.handleInput("\r");
-			await tick();
-			screen = select.render(100).join("\n");
+			screen = await until(select, /Does not match/);
 		},
 	});
 	assert.equal(seen.length, 1);
@@ -251,8 +258,7 @@ test("with a saved model, e checks at once; E opens the list again", async () =>
 		},
 		drive: async (select) => {
 			select.handleInput("e");
-			await tick();
-			assert.match(select.render(100).join("\n"), /✓ Matches the stated intent/);
+			await until(select, /✓ Matches the stated intent/);
 			select.handleInput("E");
 			assert.match(select.render(100).join("\n"), /openai\/luna \(saved\)/);
 			select.handleInput("\x1b");
@@ -270,8 +276,7 @@ test("a failed check shows the error, the next e asks for another model, and the
 		complete: async () => ({ stopReason: "error", errorMessage: "401 not signed in" }),
 		drive: async (select) => {
 			select.handleInput("e");
-			await tick();
-			assert.match(select.render(100).join("\n"), /openai\/luna could not check: 401 not signed in/);
+			await until(select, /openai\/luna could not check: 401 not signed in/);
 			select.handleInput("e");
 			assert.match(select.render(100).join("\n"), /Check with which model\?/);
 			select.handleInput("\x1b");
