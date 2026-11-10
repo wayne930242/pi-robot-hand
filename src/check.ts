@@ -141,7 +141,7 @@ export function redactInput(input: CheckInput, redact: (text: string) => string)
 		userMessage: input.userMessage === undefined ? undefined : redact(input.userMessage),
 		replies: input.replies?.map(redact),
 		since: input.since === undefined ? undefined : redact(input.since),
-		scripts: input.scripts.map((script) => ({ ...script, text: redact(script.text) })),
+		scripts: input.scripts.map((script) => ({ ...script, path: redact(script.path), ...(script.entry === undefined ? {} : { entry: redact(script.entry) }), text: redact(script.text) })),
 		unread: input.unread?.map((item) => ({ ...item, target: redact(item.target), detail: redact(item.detail) })),
 	};
 }

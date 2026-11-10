@@ -56,7 +56,7 @@ When pi has [TypeSafe](https://typesafe.ai)'s Jev classifier (a pi with classifi
 
 Set `"jevCheck": false` in `~/.pi/agent/robot-hand.json` to turn it off; it is on by default. When Jev fails, the selector says so with the HTTP status only and the choices work as before.
 
-Both checks read the scripts the command runs, found by reading files, never by running anything: script files it names, the makefile and its includes for `make`, the `package.json` entry for `npm run`, `npm test`, `pnpm`, `yarn`, and `bun run` (with npm's `pre` and `post` scripts), and, inside shell scripts, makefile recipes, package scripts, and `sh -c` strings, the scripts those run in turn, three levels deep. They read up to five files, 16 KB of each.
+Both checks read the scripts the command runs, found by reading files, never by running anything: script files it names, the makefile and its includes for `make`, the `package.json` entry for `npm run`, `npm test`, `pnpm`, `yarn`, and `bun run` (with npm's `pre` and `post` scripts), a module in the folder for `python -m`, and, inside shell scripts, makefile recipes, package scripts, here-documents, and `sh -c` strings, the scripts those run in turn, three levels deep. They read up to five files, 16 KB of each. Files whose names commonly hold credentials (`.env` files, keys, `*.ini`, `*.conf`, names with `secret` or `token`) are never sent, even when the command sources them, and neither are FIFOs or devices opened.
 What a check cannot read, the selector lists above the verdicts, whatever the verdicts say:
 
 ```
@@ -67,7 +67,7 @@ What a check cannot read, the selector lists above the verdicts, whatever the ve
  ⚠ Not read: f.sh — is past the 5-file limit
 ```
 
-**Not readable**: a file it runs is missing, not a regular file, a binary in the project, or protected by `secret_drop`. **Not followed**: the code comes from elsewhere: a download piped to a shell, standard input, a process substitution, a path or command name set at runtime, files matching a glob, a package `npx` or `dlx` may download, install scripts, or a task runner the scan does not read (`just`, `rake`, `gradle`, and the like). **Read in part**: a file over 16 KB. **Not read**: the five-file limit or the depth limit.
+**Not readable**: a file it runs is missing, not a regular file, a binary in the project, protected by `secret_drop`, or named like a credentials file. **Not followed**: the code comes from elsewhere: a download piped to a shell, standard input, a process substitution, a path or command name set at runtime, files matching a glob, a package `npx`, `dlx`, or `create` may download, install or lifecycle scripts (`npm install`, `npm publish`), a task runner (`just`, `rake`, `gradle`, and the like), a test or build runner (`node --test`, `pytest`, `cargo test`, `go run`, `pip install`), or git hooks the repository has. **Read in part**: a file over 16 KB. **Not read**: the five-file limit or the depth limit.
 Both checks get the list. While it is not empty, neither can answer match: a match becomes partial, shown as "Matches what it read; parts it could not read", and the agent's result names what was not read.
 File names, the checker's words, and the command are drawn with terminal controls, carriage returns, and bidirectional or invisible characters shown as `\u{…}` escapes, so none of them can redraw the selector; names reach the checker as JSON strings.
 

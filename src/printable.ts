@@ -5,9 +5,9 @@
  * what runs. Each such character is shown as a visible `\u{…}` escape instead.
  */
 
-// C0 and C1 controls (tab and newline aside), the bidirectional marks, embeddings, overrides, and isolates,
-// zero-width characters, line and paragraph separators, and the byte order mark.
-const HIDDEN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
+// Controls and format characters (bidirectional marks, zero-width characters, tag characters, soft hyphens),
+// line and paragraph separators, variation selectors, and the blank Hangul fillers.
+const HIDDEN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u115f\u1160\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu;
 
 function escape(char: string): string {
 	return `\\u{${(char.codePointAt(0) ?? 0).toString(16)}}`;
@@ -15,6 +15,5 @@ function escape(char: string): string {
 
 /** The text with hidden characters escaped; newlines and tabs stay unless `oneLine`. */
 export function printable(text: string, oneLine = false): string {
-	const shown = text.replace(HIDDEN, escape);
-	return oneLine ? shown.replace(/[\n\t]/g, escape) : shown;
+	return text.replace(HIDDEN, (char) => (!oneLine && (char === "\n" || char === "\t") ? char : escape(char)));
 }

@@ -6,7 +6,7 @@
  */
 
 import { constants } from "node:fs";
-import { open, readdir } from "node:fs/promises";
+import { open, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { canonicalPath, expandHome } from "./secret-drop/guard.ts";
@@ -58,14 +58,24 @@ const SHELL_EXTENSIONS = new Set([".sh", ".bash", ".zsh", ".ksh", ".dash"]);
 const MAKEFILES = ["GNUmakefile", "makefile", "Makefile"];
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "source", "."]);
 const INTERPRETER = /^(python[0-9.]*|pypy[0-9.]*|node|nodejs|ruby|perl|php|lua|luajit|pwsh|powershell|tsx|ts-node|deno|Rscript|osascript)$/;
-// Options after which the interpreter runs no code from a file or standard input (`--test` finds test files itself).
-const NO_CODE = new Set(["-v", "-V", "--version", "-h", "--help", "repl", "--test"]);
+// Options after which the interpreter runs no code from a file or standard input.
+const NO_CODE = new Set(["-v", "-V", "--version", "-h", "--help", "repl"]);
 // Interpreter options that take the next word as their value.
-const VALUE_OPTIONS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "-W", "-X"]);
+const VALUE_OPTIONS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "-W", "-X", "--env-file", "--env-file-if-exists", "--config", "--tsconfig"]);
+const INTERPRETER_VALUE_OPTIONS: Record<string, readonly string[]> = { php: ["-c", "-d", "-z", "-t"], ruby: ["-I", "-C", "-E"] };
 // Shell options that take the next word as their value.
 const SHELL_VALUE_OPTIONS = new Set(["-o", "+o", "-O", "+O", "--rcfile", "--init-file"]);
 const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
-const INSTALL_VERBS = new Set(["install", "i", "ci", "add", "it", "install-test", "isntall", "in", "rebuild"]);
+// Verbs that run install scripts of the package and its dependencies.
+const INSTALL_VERBS = new Set([
+	"install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal", "isntall", "add",
+	"ci", "ic", "clean-install", "install-clean", "isntall-clean", "it", "cit", "sit", "install-test", "install-ci-test",
+	"rebuild", "rb", "update", "up", "upgrade", "udpate", "link", "ln", "dedupe", "ddp", "import",
+]);
+// Verbs that run the package's own lifecycle scripts (prepare, prepack, preversion, and the like).
+const LIFECYCLE_VERBS = new Set(["publish", "pack", "version"]);
+// npm and pnpm options that take the next word as their value.
+const PACKAGE_VALUE_OPTIONS = new Set(["--loglevel", "--registry", "--cache", "--userconfig", "--globalconfig", "--tag", "--access", "--otp", "--reporter", "--script-shell", "--node-options", "--include", "--omit", "--config"]);
 const RUN_VERBS = new Set(["run", "run-script", "rum", "urn"]);
 const NPM_LIFECYCLE: Record<string, string> = { test: "test", t: "test", tst: "test", start: "start", stop: "stop", restart: "restart" };
 const PACKAGE_EXEC = new Set(["exec", "x", "dlx"]);
@@ -74,6 +84,25 @@ const WORKSPACE_OPTIONS = new Set(["-w", "--workspace", "--workspaces", "-ws", "
 const WORKSPACE_FLAGS = new Set(["--workspaces", "-ws", "-r", "--recursive"]);
 const PACKAGE_RUNNERS = new Set(["npx", "bunx", "pnpx", "uvx"]);
 const TASK_RUNNERS = new Set(["just", "task", "rake", "invoke", "poe", "nox", "tox", "gradle", "gradlew", "mvn", "mvnw"]);
+// Tools that run the project's own code (tests, build scripts) or a package's build code: all their verbs, or these.
+const CODE_RUNNERS: Record<string, readonly string[] | undefined> = {
+	pytest: undefined, jest: undefined, vitest: undefined, mocha: undefined, phpunit: undefined, rspec: undefined, playwright: ["test"],
+	cargo: ["run", "r", "test", "t", "build", "b", "bench", "check", "c", "install"],
+	go: ["run", "test", "generate", "install"],
+	dotnet: ["run", "test", "build"],
+	swift: ["run", "test", "build"],
+	pip: ["install"], pip3: ["install"],
+};
+// git commands that run hooks.
+const HOOK_VERBS = new Set(["commit", "push", "merge", "rebase", "pull", "checkout", "switch", "am", "cherry-pick", "revert"]);
+// File names that commonly hold credentials: never sent to a checker, even when the command sources or runs them.
+const SECRET_FILES = [
+	/^\.env(\..*)?$/i,
+	/\.env$/i,
+	/^\.?(envrc|netrc|npmrc|yarnrc\.yml|pypirc|pgpass|git-credentials|htpasswd|my\.cnf|s3cfg|dockercfg)$/i,
+	/\.(pem|key|p12|pfx|jks|keystore|kdbx|ppk|ovpn|tfvars|tfstate|ini|cfg|conf|properties)$/i,
+	/^id_(rsa|dsa|ecdsa|ed25519)/i,
+];
 const DOWNLOADERS = /\b(curl|wget|fetch|iwr|Invoke-WebRequest|Invoke-RestMethod)\b/;
 // Wrappers that run the rest of the line as a command, and their options that take a value.
 const WRAPPERS: Record<string, Set<string>> = {
@@ -92,6 +121,9 @@ const WRAPPERS: Record<string, Set<string>> = {
 	time: new Set(),
 	caffeinate: new Set(["-w", "-t"]),
 	watch: new Set(["-n", "-d"]),
+	arch: new Set(["-arch"]),
+	setsid: new Set(),
+	unbuffer: new Set(),
 };
 // Two-word wrappers that run a project's command, such as `uv run script.py`.
 const RUN_WRAPPERS: Record<string, Set<string>> = {
@@ -103,9 +135,9 @@ const RUN_WRAPPERS: Record<string, Set<string>> = {
 	hatch: new Set(["-e", "--env"]),
 	bundle: new Set(),
 };
-const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "time", "coproc"]);
+const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "coproc"]);
 const CLOSERS = new Set(["fi", "done", "esac", "}"]);
-const LOOPS = new Set(["for", "select", "case", "function"]);
+const LOOPS = new Set(["for", "select", "case"]);
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 const DOWNLOADS_PACKAGE = "may download and run a package, whose code the check does not read";
 const DYNAMIC = "$(…)";
@@ -113,7 +145,7 @@ const PROCESS = "<(…)";
 
 /** Options after which an interpreter's code is in the command itself, or a module is named, so there is no file to read. */
 function inlineFlags(base: string): readonly string[] {
-	if (/^(python|pypy)/.test(base)) return ["-c", "-m"];
+	if (/^(python|pypy)/.test(base)) return ["-c"];
 	if (["node", "nodejs", "bun", "tsx", "ts-node"].includes(base)) return ["-e", "-p", "--eval", "--print"];
 	if (base === "perl") return ["-e", "-E"];
 	if (base === "php") return ["-r"];
@@ -123,41 +155,58 @@ function inlineFlags(base: string): readonly string[] {
 }
 
 /**
+ * Markers in `parseCommands`' output, compared by identity: a subshell or command substitution opens or closes,
+ * so a `cd` inside it ends with it.
+ */
+export const SCOPE_OPEN = Object.freeze([]) as unknown as string[];
+export const SCOPE_CLOSE = Object.freeze([]) as unknown as string[];
+
+/**
  * Shell words of each simple command in `text`, in order. Quotes are removed; a command substitution
  * (`$(…)`, backticks) or process substitution becomes the placeholder `$(…)` or `<(…)` in its word and its own
- * commands are listed too; comments, here-document bodies, `case` patterns, and array literals are dropped;
- * `&&`, `||`, and parentheses inside `[[ … ]]` are part of the test; redirection operators are separate words.
- * It reads the text only: nothing is expanded or run.
+ * commands are listed too, between `SCOPE_OPEN` and `SCOPE_CLOSE`, as are a subshell's. Substitutions inside
+ * arithmetic, `${…}`, array literals, and unquoted here-documents are listed the same way. A here-document
+ * or here-string is the operator `<<<` followed by its text. Comments, `case` patterns, and the operators of
+ * `[[ … ]]` are not commands; redirection operators are separate words. It reads the text only: nothing is
+ * expanded or run.
  */
 export function parseCommands(text: string, nest = 0): string[][] {
 	const out: string[][] = [];
 	let words: string[] = [];
 	let word = "";
 	let started = false;
+	let quoted = false;
 	let quote: "'" | '"' | undefined;
 	let tag: false | "plain" | "strip" = false;
-	const heredocs: { tag: string; strip: boolean }[] = [];
-	// Inside `[[ … ]]`; inside a `case`, and whether a pattern comes next.
+	const heredocs: Heredoc[] = [];
+	// Inside `[[ … ]]`; inside a `case`, and whether a pattern comes next; open subshells.
 	let test = false;
 	let cases = 0;
 	let pattern = false;
+	let subshells = 0;
 	const atCommand = () => words.every((each) => KEYWORDS.has(each));
 	const pushWord = () => {
 		if (started) {
-			if (tag) heredocs.push({ tag: word, strip: tag === "strip" });
-			tag = false;
-			if (word === "[[" && atCommand()) test = true;
-			else if (word === "]]") test = false;
-			words.push(word);
-			if (word === "in" && words[0] === "case" && words.length >= 3) {
-				out.push(words);
-				words = [];
-				cases++;
-				pattern = true;
+			if (tag) {
+				// The here-document's text takes the tag's place once its lines are read.
+				heredocs.push({ tag: word, strip: tag === "strip", quoted, words, index: words.length });
+				tag = false;
+				words.push("");
+			} else {
+				if (word === "[[" && atCommand()) test = true;
+				else if (word === "]]") test = false;
+				words.push(word);
+				if (word === "in" && words[0] === "case" && words.length >= 3) {
+					out.push(words);
+					words = [];
+					cases++;
+					pattern = true;
+				}
 			}
 		}
 		word = "";
 		started = false;
+		quoted = false;
 	};
 	const flush = () => {
 		pushWord();
@@ -166,9 +215,12 @@ export function parseCommands(text: string, nest = 0): string[][] {
 		words = [];
 	};
 	const inner = (code: string, placeholder: string) => {
-		if (nest < MAX_NEST * 2) out.push(...parseCommands(code, nest + 1));
+		if (nest < MAX_NEST * 2) out.push(SCOPE_OPEN, ...parseCommands(code, nest + 1), SCOPE_CLOSE);
 		word += placeholder;
 		started = true;
+	};
+	const within = (code: string) => {
+		out.push(...substitutions(code, nest + 1));
 	};
 	for (let i = 0; i < text.length; i++) {
 		const ch = text[i] ?? "";
@@ -180,6 +232,7 @@ export function parseCommands(text: string, nest = 0): string[][] {
 		if (ch === "\\") {
 			const next = text[i + 1];
 			i++;
+			quoted = true;
 			if (next === undefined || next === "\n") continue;
 			if (quote === '"' && !'$`"\\'.includes(next)) word += "\\";
 			word += next;
@@ -188,8 +241,9 @@ export function parseCommands(text: string, nest = 0): string[][] {
 		}
 		if (ch === "$" && text[i + 1] === "(") {
 			const end = closingParen(text, i + 2);
-			// `$(( … ))` is arithmetic, not a command.
+			// `$(( … ))` is arithmetic; only the substitutions inside it run.
 			if (text[i + 2] === "(") {
+				within(text.slice(i + 3, end));
 				word += DYNAMIC;
 				started = true;
 			} else inner(text.slice(i + 2, end), DYNAMIC);
@@ -204,6 +258,7 @@ export function parseCommands(text: string, nest = 0): string[][] {
 		}
 		if (ch === "$" && text[i + 1] === "{") {
 			const end = Math.min(closingBrace(text, i + 2), text.length - 1);
+			within(text.slice(i + 2, end));
 			word += text.slice(i, end + 1);
 			started = true;
 			i = end;
@@ -212,6 +267,16 @@ export function parseCommands(text: string, nest = 0): string[][] {
 		if (quote === '"') {
 			if (ch === '"') quote = undefined;
 			else word += ch;
+			continue;
+		}
+		if (ch === "$" && text[i + 1] === "'") {
+			// `$'…'`: a backslash escapes the quote too.
+			let end = i + 2;
+			while (end < text.length && text[end] !== "'") end += text[end] === "\\" ? 2 : 1;
+			word += text.slice(i + 2, end);
+			started = true;
+			quoted = true;
+			i = end;
 			continue;
 		}
 		if (pattern && !started && words.length === 0) {
@@ -227,6 +292,7 @@ export function parseCommands(text: string, nest = 0): string[][] {
 		if (ch === "'" || ch === '"') {
 			quote = ch;
 			started = true;
+			quoted = true;
 			continue;
 		}
 		if (ch === "#" && !started) {
@@ -235,8 +301,10 @@ export function parseCommands(text: string, nest = 0): string[][] {
 			continue;
 		}
 		if (ch === "(" && text[i + 1] === "(" && !started && atCommand()) {
-			// `(( … ))` is arithmetic, not a command.
-			i = closingParen(text, i + 1);
+			// `(( … ))` is arithmetic; only the substitutions inside it run.
+			const end = closingParen(text, i + 1);
+			within(text.slice(i + 2, end));
+			i = end;
 			continue;
 		}
 		if (test && "&|()<>".includes(ch)) {
@@ -244,8 +312,9 @@ export function parseCommands(text: string, nest = 0): string[][] {
 			continue;
 		}
 		if (ch === "(" && started && word.endsWith("=")) {
-			// An array literal, `name=(…)`: values, not a command.
+			// An array literal, `name=(…)`: values, not a command; only the substitutions inside it run.
 			const end = closingParen(text, i + 1);
+			within(text.slice(i + 1, end));
 			word += text.slice(i, end + 1);
 			i = end;
 			continue;
@@ -266,15 +335,24 @@ export function parseCommands(text: string, nest = 0): string[][] {
 			while (op.length < 3 && (text[i + 1] === "<" || text[i + 1] === ">")) op += text[++i];
 			if ((text[i + 1] === "&" || text[i + 1] === "|") && text[i + 2] !== "&") op += text[++i];
 			if (op === "<<" && text[i + 1] === "-") op += text[++i];
-			words.push(op);
-			if (op === "<<" || op === "<<-") tag = op === "<<-" ? "strip" : "plain";
+			if (op === "<<" || op === "<<-") {
+				tag = op === "<<-" ? "strip" : "plain";
+				words.push("<<<");
+			} else words.push(op);
 			continue;
 		}
 		if (ch === "\n") {
 			flush();
 			if (heredocs.length > 0) {
-				i = skipHeredocs(text, i + 1, heredocs) - 1;
+				const { end, bodies } = readHeredocs(text, i + 1, heredocs);
+				heredocs.forEach((doc, n) => {
+					const body = bodies[n] ?? "";
+					doc.words[doc.index] = body;
+					// The shell expands substitutions in a here-document whose tag is not quoted.
+					if (!doc.quoted) within(body);
+				});
 				heredocs.length = 0;
+				i = end - 1;
 			}
 			continue;
 		}
@@ -285,7 +363,21 @@ export function parseCommands(text: string, nest = 0): string[][] {
 			pattern = true;
 			continue;
 		}
-		if (";|&()".includes(ch)) {
+		if (ch === "(") {
+			flush();
+			out.push(SCOPE_OPEN);
+			subshells++;
+			continue;
+		}
+		if (ch === ")") {
+			flush();
+			if (subshells > 0) {
+				out.push(SCOPE_CLOSE);
+				subshells--;
+			}
+			continue;
+		}
+		if (";|&".includes(ch)) {
 			flush();
 			continue;
 		}
@@ -297,6 +389,37 @@ export function parseCommands(text: string, nest = 0): string[][] {
 		started = true;
 	}
 	flush();
+	for (; subshells > 0; subshells--) out.push(SCOPE_CLOSE);
+	return out;
+}
+
+interface Heredoc {
+	tag: string;
+	strip: boolean;
+	quoted: boolean;
+	/** The command's words and where its text goes. */
+	words: string[];
+	index: number;
+}
+
+/** The commands of every command substitution in `text`, which is not itself a command (arithmetic, `${…}`, a here-document). */
+function substitutions(text: string, nest: number): string[][] {
+	const out: string[][] = [];
+	if (nest >= MAX_NEST * 2) return out;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (ch === "\\") i++;
+		else if (ch === "$" && text[i + 1] === "(") {
+			const end = closingParen(text, i + 2);
+			if (text[i + 2] === "(") out.push(...substitutions(text.slice(i + 3, end), nest + 1));
+			else out.push(SCOPE_OPEN, ...parseCommands(text.slice(i + 2, end), nest + 1), SCOPE_CLOSE);
+			i = end;
+		} else if (ch === "`") {
+			const end = closingTick(text, i + 1);
+			out.push(SCOPE_OPEN, ...parseCommands(text.slice(i + 1, end), nest + 1), SCOPE_CLOSE);
+			i = end;
+		}
+	}
 	return out;
 }
 
@@ -343,19 +466,23 @@ function closingTick(text: string, start: number): number {
 	return text.length;
 }
 
-/** The index after the last here-document body that starts at `start`. */
-function skipHeredocs(text: string, start: number, heredocs: readonly { tag: string; strip: boolean }[]): number {
+/** The text of each here-document whose lines start at `start`, and the index after the last one. */
+function readHeredocs(text: string, start: number, heredocs: readonly Heredoc[]): { end: number; bodies: string[] } {
 	let at = start;
+	const bodies: string[] = [];
 	for (const { tag, strip } of heredocs) {
+		const lines: string[] = [];
 		while (at < text.length) {
 			const newline = text.indexOf("\n", at);
 			const end = newline < 0 ? text.length : newline;
-			const line = text.slice(at, end);
+			const line = strip ? text.slice(at, end).replace(/^\t+/, "") : text.slice(at, end);
 			at = end + 1;
-			if ((strip ? line.replace(/^\t+/, "") : line) === tag) break;
+			if (line === tag) break;
+			lines.push(line);
 		}
+		bodies.push(lines.join("\n"));
 	}
-	return Math.min(at, text.length);
+	return { end: Math.min(at, text.length), bodies };
 }
 
 /** The text holds no literal command, only substitutions and variables. */
@@ -406,7 +533,8 @@ class Scanner {
 	readonly scripts: Script[] = [];
 	readonly unread: Unread[] = [];
 	private omitted = 0;
-	private readonly files = new Set<string>();
+	// `named`: seen as a plain argument and not read, so a later command that runs it reads it; `done`: read or reported.
+	private readonly files = new Map<string, "named" | "done">();
 	private readonly reported = new Set<string>();
 	private readonly queue: { text: string; where: Where }[] = [];
 	private readonly top: string;
@@ -447,7 +575,14 @@ class Scanner {
 
 	private async text(text: string, where: Where, nest: number): Promise<void> {
 		const at = { ...where };
-		for (const words of parseCommands(text)) await this.command(words, at, nest);
+		// A `cd` inside a subshell or substitution ends with it.
+		const outer: (string | undefined)[] = [];
+		for (const words of parseCommands(text)) {
+			if (words === SCOPE_OPEN) outer.push(at.cwd);
+			else if (words === SCOPE_CLOSE) {
+				if (outer.length > 0) at.cwd = outer.pop();
+			} else await this.command(words, at, nest);
+		}
 	}
 
 	private async command(all: string[], where: Where, nest: number): Promise<void> {
@@ -459,11 +594,14 @@ class Scanner {
 		}
 		const base = basename(name);
 		if (name === "cd" || name === "pushd" || name === "popd") {
-			where.cwd = changeDir(where.cwd, name === "popd" ? undefined : args.find((arg) => !arg.startsWith("-")));
+			const target = args.find((arg) => !arg.startsWith("-"));
+			// `popd` and a bare `pushd` return to a folder the scan does not track.
+			where.cwd = name === "popd" || (name === "pushd" && target === undefined) ? undefined : changeDir(where.cwd, target);
 			return;
 		}
 		if (isDynamic(name)) {
-			if (where.mode === "shell") this.note("indirect", line, `runs a command whose name is set at runtime (${name})`, name);
+			// In a makefile, `$(CC)` is make's own; a path built from a variable is not.
+			if (where.mode === "shell" || name.includes("/")) this.note("indirect", line, `runs a command whose name is set at runtime (${name})`, name);
 		} else if (SHELLS.has(name) || SHELLS.has(base)) {
 			await this.shell(name, args, input, inline, xargs, line, where, nest);
 		} else if (INTERPRETER.test(base) || base === "bun") {
@@ -477,6 +615,20 @@ class Scanner {
 			if (!(base === "npx" && args.some((arg) => arg === "--no-install" || arg === "--no"))) this.note("indirect", line, DOWNLOADS_PACKAGE);
 		} else if (TASK_RUNNERS.has(base)) {
 			this.note("indirect", line, `${base} runs tasks defined in its own files, which the check does not read`);
+		} else if (Object.hasOwn(CODE_RUNNERS, base)) {
+			const verbs = CODE_RUNNERS[base];
+			const verb = args.find((arg) => !arg.startsWith("-"));
+			if (verbs === undefined || (verb !== undefined && verbs.includes(verb))) this.note("indirect", line, "runs code from the project, or from packages it builds or installs, which the check does not read");
+		} else if (base === "git") {
+			await this.git(args, line, where);
+		} else if (base === "find") {
+			// `-exec cmd {} ;` and the like run a command for each file found.
+			for (let i = 0; i < args.length; i++) {
+				if (!["-exec", "-execdir", "-ok", "-okdir"].includes(args[i] ?? "")) continue;
+				const end = args.findIndex((arg, j) => j > i && (arg === ";" || arg === "+"));
+				await this.command(args.slice(i + 1, end < 0 ? args.length : end), where, nest);
+				i = end < 0 ? args.length : end;
+			}
 		} else if (base === "eval") {
 			await this.code(args.join(" "), "eval", line, where, nest);
 		} else if (name.includes("/") || (project && SCRIPT_EXTENSIONS.has(extname(name).toLowerCase()))) {
@@ -485,7 +637,7 @@ class Scanner {
 		await this.generic(generic, where);
 	}
 
-	/** A string run as shell code (`sh -c`, `eval`): scanned like the command, or reported when it is built at runtime. */
+	/** A string run as shell code (`sh -c`, `eval`, a here-document): scanned like the command, or reported when built at runtime. */
 	private async code(code: string | undefined, how: string, line: string, where: Where, nest: number): Promise<void> {
 		if (code === undefined || onlyDynamic(code)) {
 			if (where.mode === "shell" || code === undefined) this.note("indirect", line, `${how} runs code built at runtime`);
@@ -498,7 +650,7 @@ class Scanner {
 		await this.text(code, { ...where }, nest + 1);
 	}
 
-	private async shell(name: string, args: string[], input: string | undefined, inline: boolean, xargs: boolean, line: string, where: Where, nest: number): Promise<void> {
+	private async shell(name: string, args: string[], input: string | undefined, inline: string | undefined, xargs: boolean, line: string, where: Where, nest: number): Promise<void> {
 		for (let i = 0; i < args.length; i++) {
 			const arg = args[i] ?? "";
 			if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg)) {
@@ -513,26 +665,37 @@ class Scanner {
 				return;
 			}
 		}
-		await this.stdin(input, inline, xargs, line, where, true);
+		// A here-document or here-string fed to a shell is shell code: scan it like the command.
+		if (inline !== undefined) await this.code(inline, `${basename(name)} <<`, line, where, nest);
+		else await this.stdin(input, xargs, line, where, true);
 	}
 
-	private async interpreter(base: string, args: string[], input: string | undefined, inline: boolean, xargs: boolean, line: string, where: Where): Promise<void> {
+	private async interpreter(base: string, args: string[], input: string | undefined, inline: string | undefined, xargs: boolean, line: string, where: Where): Promise<void> {
 		// Bare `bun` prints its help.
 		if (base === "bun" && args.length === 0) return;
 		if (base === "bun" && args[0] !== undefined && !args[0].startsWith("-") && !SCRIPT_EXTENSIONS.has(extname(args[0]).toLowerCase()) && !args[0].includes("/")) {
 			await this.packageManager(base, args, line, where);
 			return;
 		}
+		const values = INTERPRETER_VALUE_OPTIONS[base] ?? [];
 		for (let i = 0; i < args.length; i++) {
 			const arg = args[i] ?? "";
 			if (inlineFlags(base).includes(arg) || NO_CODE.has(arg)) return;
+			if (arg === "--test") {
+				this.note("indirect", line, "runs the test files it finds, which the check does not read");
+				return;
+			}
+			if (arg === "-m" && /^(python|pypy)/.test(base)) {
+				await this.module(args[i + 1], line, where);
+				return;
+			}
 			// `-` reads the program from standard input; what follows are its arguments.
 			if (arg === "-") break;
 			if (base === "deno" && arg === "task") {
 				this.note("indirect", line, "deno task runs tasks defined in deno.json, which the check does not read");
 				return;
 			}
-			if (VALUE_OPTIONS.has(arg)) i++;
+			if (VALUE_OPTIONS.has(arg) || values.includes(arg)) i++;
 			else if (arg.startsWith("-")) continue;
 			else if (base === "deno" && ["run", "test", "bench", "compile"].includes(arg)) continue;
 			else if (base === "bun" && arg === "run") continue;
@@ -541,16 +704,28 @@ class Scanner {
 				return;
 			}
 		}
-		await this.stdin(input, inline, xargs, line, where, false);
+		// A here-document fed to an interpreter is code written in the command itself.
+		if (inline === undefined) await this.stdin(input, xargs, line, where, false);
 	}
 
-	/** An interpreter given no file reads its code from standard input, a redirected file, or a here-document. */
-	private async stdin(input: string | undefined, inline: boolean, xargs: boolean, line: string, where: Where, shell: boolean): Promise<void> {
+	/** `python -m name`: a module in the folder it runs in is read; an installed one is judged by its name, like a command on PATH. */
+	private async module(name: string | undefined, line: string, where: Where): Promise<void> {
+		if (name === undefined || isDynamic(name)) {
+			this.note("indirect", line, "runs a module named at runtime");
+			return;
+		}
+		if (where.cwd === undefined || !/^[\w.]+$/.test(name)) return;
+		const path = join(where.cwd, ...name.split("."));
+		const found = await firstFile([`${path}.py`, join(path, "__main__.py")]);
+		if (found) await this.read(found, { shown: this.shown(found), runs: true, cwd: where.cwd, depth: where.depth + 1 });
+	}
+
+	/** An interpreter given no file reads its code from standard input or a redirected file. */
+	private async stdin(input: string | undefined, xargs: boolean, line: string, where: Where, shell: boolean): Promise<void> {
 		if (input !== undefined) {
 			await this.runs(input, line, where, shell);
 			return;
 		}
-		if (inline) return;
 		if (xargs) this.note("indirect", line, "runs files named on standard input, which the check does not see");
 		else this.note("indirect", line, where.downloads ? "runs code from standard input, which may be what the command downloads" : "runs code from standard input, which the check does not see");
 	}
@@ -562,7 +737,7 @@ class Scanner {
 			return;
 		}
 		if (isDynamic(word)) {
-			if (where.mode === "shell") this.note("indirect", short(word), "runs a path set at runtime");
+			if (where.mode === "shell" || word.includes("/")) this.note("indirect", short(word), "runs a path set at runtime");
 			return;
 		}
 		if (/[*?[]/.test(word)) {
@@ -581,7 +756,7 @@ class Scanner {
 	/** Words that name an existing script file, wherever they stand: read them, but never report a missing one. */
 	private async generic(words: readonly string[], where: Where): Promise<void> {
 		for (const word of words) {
-			if (!word || word.startsWith("-") || word.includes("=") || isDynamic(word) || /^[<>&|0-9]+$/.test(word)) continue;
+			if (!word || word.startsWith("-") || word.includes("=") || isDynamic(word) || /^[<>&|0-9;+{}]+$/.test(word)) continue;
 			const base = isAbsolute(expandHome(word)) ? "/" : where.cwd;
 			if (base === undefined) continue;
 			await this.read(canonicalPath(word, base), { shown: word, runs: false, cwd: where.cwd, depth: where.depth + 1 });
@@ -590,24 +765,32 @@ class Scanner {
 
 	private async read(path: string, how: Read): Promise<void> {
 		const canonical = canonicalPath(path, "/");
-		if (this.files.has(canonical)) return;
-		this.files.add(canonical);
-		if (this.isSecret(canonical)) {
-			if (how.runs) this.note("missing", how.shown, "secret_drop protects it, so it is never sent");
+		const seen = this.files.get(canonical);
+		if (seen === "done" || (seen === "named" && !how.runs)) return;
+		const named = () => void this.files.set(canonical, "named");
+		this.files.set(canonical, "done");
+		const withheld = this.isSecret(canonical) ? "secret_drop protects it, so it is never sent" : secretLike(canonical) ? "may hold secrets, so it is not sent" : undefined;
+		if (withheld) {
+			if (how.runs) this.note("missing", how.shown, withheld);
+			else named();
 			return;
 		}
-		const file = await readText(canonical, MAX_SCRIPT_BYTES + REDACT_MARGIN);
+		const ext = extname(canonical).toLowerCase();
+		const byName = how.runs || how.make || how.shell || SCRIPT_EXTENSIONS.has(ext) || MAKEFILES.includes(basename(canonical));
+		// Two bytes tell a `#!` script from any other file, so a long list of plain files costs little.
+		let file = await readText(canonical, byName ? MAX_SCRIPT_BYTES + REDACT_MARGIN : 2);
 		if (file.kind !== "text") {
-			if (!how.runs) return;
-			if (file.kind === "absent") this.note("missing", how.shown, "does not exist");
+			if (!how.runs) named();
+			else if (file.kind === "absent") this.note("missing", how.shown, "does not exist");
 			else if (file.kind === "other") this.note("missing", how.shown, "is not a regular file");
 			// A compiled program on the system is judged by its name, like any command on PATH.
 			else if (!isAbsolute(expandHome(how.shown))) this.note("missing", how.shown, "is a binary file, not text");
 			return;
 		}
-		const head = file.head;
-		const isScript = how.runs || how.make || how.shell || SCRIPT_EXTENSIONS.has(extname(canonical).toLowerCase()) || head.startsWith("#!") || MAKEFILES.includes(basename(canonical));
-		if (!isScript) return;
+		if (!byName && !file.head.startsWith("#!")) {
+			named();
+			return;
+		}
 		// A script a nested script merely names is read when there is room, and left out silently when not.
 		const report = how.runs || how.depth === 1;
 		if (how.depth > MAX_DEPTH) {
@@ -618,14 +801,22 @@ class Scanner {
 			if (report) this.note("skipped", how.shown, `is past the ${MAX_SCRIPTS}-file limit`);
 			return;
 		}
-		const truncated = file.size > MAX_SCRIPT_BYTES;
-		const text = this.redact(head).slice(0, MAX_SCRIPT_BYTES);
+		if (!byName) file = await readText(canonical, MAX_SCRIPT_BYTES + REDACT_MARGIN);
+		if (file.kind !== "text") return;
+		// Redact the whole read first, then cut in bytes, so the cut never splits a secret the margin holds whole.
+		const redacted = this.redact(file.head);
+		const text = cutBytes(redacted, MAX_SCRIPT_BYTES);
+		const truncated = file.size > MAX_SCRIPT_BYTES || text.length < redacted.length;
 		this.scripts.push({ path: canonical, text, truncated });
-		if (truncated) this.note("truncated", how.shown, `only the first ${size(MAX_SCRIPT_BYTES)} of ${size(file.size)} were read`);
+		if (truncated) this.note("truncated", how.shown, `only the first ${size(MAX_SCRIPT_BYTES)} of ${size(Math.max(file.size, Buffer.byteLength(redacted)))} were read`);
 		const where: Where = { cwd: how.cwd, dir: dirname(canonical), depth: how.depth, mode: "shell", downloads: DOWNLOADERS.test(text) };
 		if (how.make || MAKEFILES.includes(basename(canonical))) {
-			for (const include of makeIncludes(text)) await this.read(resolve(how.cwd ?? dirname(canonical), expandHome(include)), { shown: include, runs: true, make: true, cwd: how.cwd, depth: how.depth });
-			this.queue.push({ text: makeRecipes(text), where: { ...where, mode: "make" } });
+			const make = makefile(text);
+			for (const include of make.includes) {
+				if (include.includes("$") || /[*?[]/.test(include)) this.note("indirect", include, "is a makefile included from a path set at runtime");
+				else await this.read(resolve(how.cwd ?? dirname(canonical), expandHome(include)), { shown: include, runs: true, make: true, cwd: how.cwd, depth: how.depth });
+			}
+			this.queue.push({ text: make.shell, where: { ...where, mode: "make" } });
 		} else if (how.shell || isShellScript(canonical, text)) {
 			this.queue.push({ text, where });
 		}
@@ -678,6 +869,8 @@ class Scanner {
 			else if (WORKSPACE_OPTIONS.has(option)) {
 				workspaces = true;
 				if (attached === undefined && !WORKSPACE_FLAGS.has(option)) i++;
+			} else if (PACKAGE_VALUE_OPTIONS.has(option)) {
+				if (attached === undefined) i++;
 			} else if (!arg.startsWith("-")) words.push(arg);
 		}
 		const [verb, next] = words;
@@ -689,9 +882,17 @@ class Scanner {
 			this.note("indirect", line, "runs install scripts of the package and its dependencies, which the check does not read");
 			return;
 		}
-		if (PACKAGE_EXEC.has(verb)) {
+		if (LIFECYCLE_VERBS.has(verb)) {
+			this.note("indirect", line, "runs the package's lifecycle scripts (prepare, prepack, and the like), which the check does not read");
+			return;
+		}
+		if (PACKAGE_EXEC.has(verb) || verb === "create" || (verb === "init" && pm === "npm" && next !== undefined)) {
 			// `pnpm exec` and `yarn exec` run only an installed binary.
 			if (!(verb === "exec" && (pm === "pnpm" || pm === "yarn"))) this.note("indirect", line, DOWNLOADS_PACKAGE);
+			return;
+		}
+		if (pm === "yarn" && (verb === "workspace" || verb === "workspaces")) {
+			this.note("indirect", line, "runs a command in workspace packages, which the check does not read");
 			return;
 		}
 		const explicit = RUN_VERBS.has(verb);
@@ -744,7 +945,7 @@ class Scanner {
 		}
 		const key = `${path}#${name}`;
 		if (this.files.has(key)) return true;
-		this.files.add(key);
+		this.files.set(key, "done");
 		if (depth > MAX_DEPTH) {
 			this.note("skipped", line, `is nested more than ${MAX_DEPTH} levels deep`);
 			return true;
@@ -755,10 +956,30 @@ class Scanner {
 		}
 		const names = (pm === "npm" ? [`pre${name}`, name, `post${name}`] : [name]).filter((key) => script(key) !== undefined);
 		const values = names.map((key) => [key, this.redact(script(key) ?? "")] as const);
-		const text = values.map(([key, value]) => `${key}: ${value}`).join("\n");
-		this.scripts.push({ path, entry: `scripts.${name}`, text: text.slice(0, MAX_SCRIPT_BYTES), truncated: text.length > MAX_SCRIPT_BYTES });
+		const whole = values.map(([key, value]) => `${key}: ${value}`).join("\n");
+		const text = cutBytes(whole, MAX_SCRIPT_BYTES);
+		this.scripts.push({ path, entry: this.redact(`scripts.${name}`), text, truncated: text.length < whole.length });
 		for (const [, value] of values) this.queue.push({ text: value, where: { cwd: dir, dir, depth, mode: "shell", downloads: DOWNLOADERS.test(value) } });
 		return true;
+	}
+
+	/** git commands that run hooks: reported when the repository has hooks, which the check does not read. */
+	private async git(args: string[], line: string, where: Where): Promise<void> {
+		let dir = where.cwd;
+		let verb: string | undefined;
+		for (let i = 0; i < args.length && verb === undefined; i++) {
+			const arg = args[i] ?? "";
+			if (arg === "-C") dir = changeDir(dir, args[++i]);
+			else if (arg === "-c" || arg === "--git-dir" || arg === "--work-tree" || arg === "--namespace") i++;
+			else if (!arg.startsWith("-")) verb = arg;
+		}
+		if (verb === undefined || !HOOK_VERBS.has(verb) || args.includes("--no-verify")) return;
+		if (dir === undefined) {
+			this.note("indirect", line, "may run git hooks of a repository set at runtime, which the check does not read");
+			return;
+		}
+		const hooks = await gitHooks(dir);
+		if (hooks) this.note("indirect", line, `runs git hooks (${hooks}), which the check does not read`);
 	}
 }
 
@@ -769,8 +990,8 @@ interface Command {
 	args: string[];
 	/** The file standard input comes from (`< file`). */
 	input?: string;
-	/** Standard input is a here-document or here-string, so its code is in the text itself. */
-	inline: boolean;
+	/** The text of a here-document or here-string fed to standard input. */
+	inline?: string;
 	/** `xargs` adds the arguments from standard input. */
 	xargs: boolean;
 	/** `uv run` and the like run a script named as the command word. */
@@ -782,19 +1003,14 @@ interface Command {
 function splitCommand(all: readonly string[]): Command {
 	const words: string[] = [];
 	let input: string | undefined;
-	let inline = false;
+	let inline: string | undefined;
 	for (let i = 0; i < all.length; i++) {
 		const word = all[i] ?? "";
 		if (/^(<|>|>>|<>|>\||&>|&>>|<&|>&)$/.test(word)) {
 			const target = all[++i];
 			if (word === "<" && target !== undefined) input = target;
-		} else if (/^<<-?$/.test(word)) {
-			i++;
-			inline = true;
-		} else if (word === "<<<") {
-			i++;
-			inline = true;
-		} else words.push(word);
+		} else if (word === "<<<") inline = all[++i] ?? "";
+		else words.push(word);
 	}
 	const generic = words.filter((word) => !ASSIGNMENT.test(word));
 	let i = 0;
@@ -807,9 +1023,14 @@ function splitCommand(all: readonly string[]): Command {
 			i++;
 			continue;
 		}
+		// `function name {`: the body follows.
+		if (word === "function") {
+			i += 2;
+			continue;
+		}
 		if (LOOPS.has(word) || CLOSERS.has(word)) return { args: [], inline, xargs, project, generic };
 		const values = WRAPPERS[base];
-		if (values) {
+		if (values && Object.hasOwn(WRAPPERS, base)) {
 			if (base === "xargs") xargs = true;
 			i++;
 			while (i < words.length) {
@@ -822,7 +1043,7 @@ function splitCommand(all: readonly string[]): Command {
 			if ((base === "timeout" || base === "nice") && /^\d/.test(words[i] ?? "")) i++;
 			continue;
 		}
-		const run = RUN_WRAPPERS[base];
+		const run = Object.hasOwn(RUN_WRAPPERS, base) ? RUN_WRAPPERS[base] : undefined;
 		if (run && (words[i + 1] === "run" || (base === "bundle" && words[i + 1] === "exec"))) {
 			i += 2;
 			while (i < words.length && (words[i] ?? "").startsWith("-")) i += run.has(words[i] ?? "") ? 2 : 1;
@@ -840,6 +1061,23 @@ function changeDir(cwd: string | undefined, target: string | undefined): string 
 	return resolve(cwd, expandHome(target));
 }
 
+/** A name that commonly holds credentials, such as an env file, a key, or a config file. */
+function secretLike(path: string): boolean {
+	const name = basename(path);
+	if (SECRET_FILES.some((pattern) => pattern.test(name))) return true;
+	return !SCRIPT_EXTENSIONS.has(extname(name).toLowerCase()) && /secret|credential|passw|token/i.test(name);
+}
+
+/** The first `bytes` bytes of `text`, without a character cut in half. */
+function cutBytes(text: string, bytes: number): string {
+	const buffer = Buffer.from(text, "utf8");
+	if (buffer.length <= bytes) return text;
+	let end = bytes;
+	// Back up to the start of a UTF-8 character.
+	while (end > 0 && ((buffer[end] ?? 0) & 0xc0) === 0x80) end--;
+	return buffer.subarray(0, end).toString("utf8");
+}
+
 async function locate(word: string, where: Where): Promise<string | undefined> {
 	const expanded = expandHome(word);
 	if (isAbsolute(expanded)) return (await exists(expanded)) ? expanded : undefined;
@@ -847,9 +1085,15 @@ async function locate(word: string, where: Where): Promise<string | undefined> {
 	return firstFile(bases.map((base) => resolve(base, expanded)));
 }
 
+/** Whether something is at `path`; it only asks the file system, so nothing is opened. */
 async function exists(path: string): Promise<boolean> {
-	const file = await readText(path, 1);
-	return file.kind !== "absent";
+	try {
+		await stat(path);
+		return true;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return code !== "ENOENT" && code !== "ENOTDIR";
+	}
 }
 
 async function firstFile(paths: readonly string[]): Promise<string | undefined> {
@@ -860,15 +1104,22 @@ async function firstFile(paths: readonly string[]): Promise<string | undefined> 
 type FileRead = { kind: "absent" } | { kind: "other" } | { kind: "binary" } | { kind: "text"; head: string; size: number };
 
 /**
- * The start of a regular text file. It opens without blocking and checks the opened handle, so a FIFO or device,
- * or a file swapped for one after a check, never stalls the scan.
+ * The start of a regular text file. Anything else (a FIFO, a device, a folder) is never opened, since opening
+ * one can release a waiting writer or reset a serial device. The open is non-blocking and the opened handle is
+ * checked again, so a file swapped for one of those after the check never stalls the scan.
  */
 async function readText(path: string, bytes: number): Promise<FileRead> {
+	try {
+		if (!(await stat(path)).isFile()) return { kind: "other" };
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return code === "ENOENT" || code === "ENOTDIR" ? { kind: "absent" } : { kind: "other" };
+	}
 	let handle: Awaited<ReturnType<typeof open>>;
 	try {
 		handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR" ? { kind: "absent" } : { kind: "other" };
+	} catch {
+		return { kind: "other" };
 	}
 	try {
 		const info = await handle.stat();
@@ -887,10 +1138,33 @@ async function readText(path: string, bytes: number): Promise<FileRead> {
 
 /** The makefile make picks in `dir`, named as it is on disk even where names ignore case. */
 async function findMakefile(dir: string): Promise<string | undefined> {
-	const names = await readdir(dir).catch(() => [] as string[]);
-	const exact = MAKEFILES.find((name) => names.includes(name));
-	if (exact) return join(dir, exact);
-	return firstFile(MAKEFILES.map((name) => join(dir, name)));
+	const found = await firstFile(MAKEFILES.map((name) => join(dir, name)));
+	return found === undefined ? undefined : realpath(found).catch(() => found);
+}
+
+/** The hooks git would run in the repository holding `dir`, named, or undefined when there are none. */
+async function gitHooks(dir: string): Promise<string | undefined> {
+	for (let at = dir; ; at = dirname(at)) {
+		const dotGit = join(at, ".git");
+		const info = await stat(dotGit).catch(() => undefined);
+		if (info) {
+			let gitDir = dotGit;
+			if (info.isFile()) {
+				const pointer = await readText(dotGit, 4_096);
+				const target = pointer.kind === "text" ? /^gitdir:\s*(.+)$/m.exec(pointer.head)?.[1] : undefined;
+				if (!target) return undefined;
+				gitDir = resolve(at, target.trim());
+			}
+			const common = await readText(join(gitDir, "commondir"), 4_096);
+			const commonDir = common.kind === "text" ? resolve(gitDir, common.head.trim()) : gitDir;
+			// Only matched here, never sent: the config can hold credentials in remote URLs.
+			const config = await readText(join(commonDir, "config"), 64_000);
+			if (config.kind === "text" && /^\s*hookspath\s*=/im.test(config.head)) return "from core.hooksPath";
+			const hooks = (await readdir(join(commonDir, "hooks")).catch(() => [] as string[])).filter((name) => !name.endsWith(".sample")).sort();
+			return hooks.length > 0 ? hooks.join(", ") : undefined;
+		}
+		if (dirname(at) === at) return undefined;
+	}
 }
 
 function isShellScript(path: string, text: string): boolean {
@@ -899,28 +1173,89 @@ function isShellScript(path: string, text: string): boolean {
 	return /^#!.*\b(ba|z|k|da)?sh\b/.test(first);
 }
 
-/** A makefile's recipe lines as shell text: the leading tab and `@`, `-`, `+` removed, `$(MAKE)` as `make`. */
-function makeRecipes(text: string): string {
-	return text
-		.split("\n")
-		.filter((line) => line.startsWith("\t"))
-		.map((line) => line.slice(1).replace(/^[@+-]+/, "").replace(/\$[({]MAKE[)}]/g, "make"))
-		.join("\n");
+/**
+ * What a makefile runs, as shell text, and the files it includes. Continuation lines are joined; recipe lines
+ * (after a tab, or after `;` on a rule line) lose their `@`, `-`, and `+`; `$(shell …)` anywhere is run too.
+ * Variables set to a literal value are expanded; any other make reference becomes `${NAME}`, so the shell scan
+ * sees a value set at runtime. `$$` is the shell's `$`.
+ */
+function makefile(text: string): { shell: string; includes: string[] } {
+	const lines = text.replace(/\\\r?\n[ \t]*/g, " ").split("\n");
+	const vars = new Map<string, string | undefined>([["MAKE", "make"]]);
+	for (const line of lines) {
+		if (line.startsWith("\t")) continue;
+		const match = /^\s*(?:(?:export|override)\s+)*([A-Za-z_][\w.-]*)\s*(::?=|:::=|\?=|\+=|!=|=)\s*(.*)$/.exec(line);
+		if (!match?.[1]) continue;
+		const value = match[3]?.trim() ?? "";
+		vars.set(match[1], match[2] === "+=" || match[2] === "!=" || value.includes("$") ? undefined : value);
+	}
+	const shells = new Set<string>();
+	const expand = (part: string, depth = 0): string => {
+		let out = "";
+		for (let i = 0; i < part.length; i++) {
+			const ch = part[i];
+			if (ch !== "$") {
+				out += ch;
+				continue;
+			}
+			const next = part[i + 1];
+			if (next === "$") {
+				out += "$";
+				i++;
+			} else if (next === "(" || next === "{") {
+				const end = closingBracket(part, i + 1);
+				const inner = part.slice(i + 2, end);
+				if (/^shell\s/.test(inner) && depth < MAX_NEST) {
+					shells.add(expand(inner.slice(6), depth + 1));
+					out += "${shell}";
+				} else {
+					const name = inner.split(/[\s:,]/)[0] || "make";
+					const value = vars.get(inner);
+					out += value !== undefined && depth < MAX_NEST ? value : `\${${name}}`;
+				}
+				i = end;
+			} else {
+				out += `\${${next ?? ""}}`;
+				i++;
+			}
+		}
+		return out;
+	};
+	const recipes: string[] = [];
+	const includes: string[] = [];
+	for (const line of lines) {
+		if (line.startsWith("\t")) {
+			recipes.push(expand(line.slice(1).replace(/^[@+-]+/, "")));
+			continue;
+		}
+		const include = /^\s*-?s?include[ \t]+(.+)$/.exec(line);
+		if (include?.[1]) {
+			includes.push(...expand(include[1]).trim().split(/[ \t]+/).filter(Boolean));
+			continue;
+		}
+		const rule = /^([^#\t=:][^#=:]*)::?(?!=)([^;=#]*);(.*)$/.exec(line);
+		if (rule?.[3]) recipes.push(expand(rule[3].trim().replace(/^[@+-]+/, "")));
+		else expand(line);
+	}
+	return { shell: [...recipes, ...shells].join("\n"), includes };
 }
 
-/** Files a makefile includes, named literally. */
-function makeIncludes(text: string): string[] {
-	const files: string[] = [];
-	for (const line of text.split("\n")) {
-		const match = /^-?s?include[ \t]+(.+)$/.exec(line);
-		if (match?.[1]) for (const file of match[1].trim().split(/[ \t]+/)) if (file && !file.includes("$") && !/[*?[]/.test(file)) files.push(file);
+/** The index of the bracket that closes the `(` or `{` at `start`, counting only that kind, or the text's end. */
+function closingBracket(text: string, start: number): number {
+	const open = text[start];
+	const close = open === "(" ? ")" : "}";
+	let depth = 0;
+	for (let i = start; i < text.length; i++) {
+		if (text[i] === open) depth++;
+		else if (text[i] === close && --depth === 0) return i;
 	}
-	return files;
+	return text.length - 1;
 }
 
 /**
  * Script files the command runs, read for the check, and what it runs that could not be read. Secret files
- * (secret_drop's registry and staging) are never read; every text read is redacted.
+ * (secret_drop's registry and staging, and files whose names commonly hold credentials) are never read; every
+ * text read is redacted.
  */
 export async function findScripts(command: string, cwd: string, isSecret: (canonical: string) => boolean, redact: Redact = keep): Promise<ScriptScan> {
 	return new Scanner(cwd, isSecret, redact).run(command);
