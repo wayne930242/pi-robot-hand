@@ -168,6 +168,8 @@ export const SCOPE_CLOSE = Object.freeze([]) as unknown as string[];
 export const UNSURE = Object.freeze([]) as unknown as string[];
 /** Substitutions nested past the limit were not parsed. */
 export const TOO_DEEP = Object.freeze([]) as unknown as string[];
+/** Marks a command after `&&`: a `cd` in it holds for the rest of its list, and leaves the folder unknown after. */
+export const CHAINED = Object.freeze([]) as unknown as string[];
 const BLOCK_OPENERS = new Set(["if", "while", "until", "for", "select", "case", "{"]);
 const BLOCK_CLOSERS = new Set(["fi", "done", "esac", "}"]);
 
@@ -200,7 +202,20 @@ export function parseCommands(text: string, nest = 0): string[][] {
 	// The operator before the command being read, and whether that command is unsure.
 	let before = ";";
 	let unsure = false;
-	const atCommand = () => words.every((each) => KEYWORDS.has(each));
+	// `function NAME` is followed by the body, which may start with a reserved word such as `{`.
+	const atCommand = () => {
+		let at = 0;
+		const skip = () => {
+			while (at < words.length && KEYWORDS.has(words[at] ?? "")) at++;
+		};
+		skip();
+		if (keyword && words[at] === "function") {
+			if (words.length < at + 2) return false;
+			at += 2;
+			skip();
+		}
+		return at === words.length;
+	};
 	const pushWord = () => {
 		if (started) {
 			if (tag) {
@@ -233,15 +248,19 @@ export function parseCommands(text: string, nest = 0): string[][] {
 	const flush = (after = ";") => {
 		pushWord();
 		if (words[0] === "esac" && keyword) cases = Math.max(0, cases - 1);
-		if (words.length > 0) {
+		const empty = words.length === 0;
+		if (!empty) {
 			// `||` may skip it; a pipeline or `&` runs it in a child; a compound command may skip or repeat it.
 			if (unsure || blocks > 0 || before === "||" || before === "|" || after === "|" || after === "&") out.push(UNSURE);
+			// After `&&`, it runs only if the commands before it in the list did; the scan must know where the list ends.
+			else if (before === "&&") out.push(CHAINED);
 			out.push(words);
 		}
 		words = [];
 		keyword = false;
 		unsure = false;
-		before = after;
+		// A line break after `&&`, `||`, or `|` continues the list.
+		if (!empty || after !== ";" || !["&&", "||", "|"].includes(before)) before = after;
 	};
 	const inner = (code: string, placeholder: string) => {
 		if (nest < MAX_NEST * 2) out.push(SCOPE_OPEN, ...parseCommands(code, nest + 1), SCOPE_CLOSE);
@@ -487,7 +506,7 @@ function closingParen(text: string, start: number): number {
 		} else if (ch === "\n" && tags.length > 0) {
 			i = readHeredocs(text, i + 1, tags.map(({ tag, strip }) => ({ tag, strip, quoted: true, words: [], index: 0 }))).end - 1;
 			tags.length = 0;
-		} else if (reserved(i, "case")) {
+		} else if (reserved(i, "case") && commandStart(text, i, start)) {
 			cases++;
 			i += 3;
 		} else if (cases > 0 && reserved(i, "esac")) {
@@ -498,6 +517,15 @@ function closingParen(text: string, start: number): number {
 		else if (ch === ")" && --depth === 0) return i;
 	}
 	return text.length;
+}
+
+/** Whether the word at `at` is where a command starts: after `;`, `&`, `|`, `(`, a line break, or a reserved word. */
+function commandStart(text: string, at: number, start: number): boolean {
+	let i = at - 1;
+	while (i >= start && (text[i] === " " || text[i] === "\t")) i--;
+	if (i < start || ";&|(\n".includes(text[i] ?? "")) return true;
+	const word = /([\w{!]+)$/.exec(text.slice(Math.max(start, i - 7), i + 1))?.[1];
+	return word !== undefined && KEYWORDS.has(word);
 }
 
 /**
@@ -623,10 +651,12 @@ class Scanner {
 	private readonly top: string;
 	private readonly isSecret: (canonical: string) => boolean;
 	private readonly redact: Redact;
+	private readonly redactKnown: Redact;
 
 	constructor(cwd: string, isSecret: (canonical: string) => boolean, redact: Redact) {
 		this.top = resolve(cwd);
 		this.isSecret = isSecret;
+		this.redactKnown = redact;
 		// Everything the scan sends or shows passes here: secret_drop's values, then anything else that looks like one.
 		this.redact = (text) => maskSecrets(redact(text));
 	}
@@ -660,26 +690,45 @@ class Scanner {
 	/** Scans shell text. `inPlace` (for `eval`) lets a `cd` in it change `where`, as in the shell that runs it. */
 	private async text(text: string, where: Where, nest: number, inPlace = false): Promise<void> {
 		const at = inPlace ? where : { ...where };
-		// A `cd` inside a subshell or substitution ends with it.
-		const outer: (string | undefined)[] = [];
+		// A `cd` inside a subshell or substitution ends with it. One after `&&` holds to the end of its list (`tentative`),
+		// and after that the folder is unknown: the list may have stopped before it.
+		const outer: { cwd: string | undefined; tentative: boolean }[] = [];
 		let unsure = false;
+		let chained = false;
+		let tentative = false;
 		for (const words of parseCommands(text)) {
-			if (words === SCOPE_OPEN) outer.push(at.cwd);
-			else if (words === SCOPE_CLOSE) {
-				if (outer.length > 0) at.cwd = outer.pop();
+			if (words === SCOPE_OPEN) {
+				outer.push({ cwd: at.cwd, tentative });
+				tentative = false;
+			} else if (words === SCOPE_CLOSE) {
+				const saved = outer.pop();
+				if (saved) ({ cwd: at.cwd, tentative } = saved);
 			} else if (words === UNSURE) unsure = true;
+			else if (words === CHAINED) chained = true;
 			else if (words === TOO_DEEP) this.note("skipped", text, `has command substitutions nested more than ${MAX_NEST * 2} levels deep`, "\0deep");
 			else {
+				if (!chained && tentative) {
+					at.cwd = undefined;
+					tentative = false;
+				}
+				const cwd = at.cwd;
 				await this.command(words, at, nest, unsure);
+				if (chained && at.cwd !== cwd) tentative = true;
 				unsure = false;
+				chained = false;
 			}
 		}
+		if (tentative) at.cwd = undefined;
 	}
 
 	private async command(all: string[], where: Where, nest: number, unsure = false): Promise<void> {
 		const { name, args, assigns, input, inline, xargs, project, generic } = splitCommand(all);
 		const line = all.join(" ");
 		for (const assign of assigns) await this.preload(assign, line, where);
+		// `export NODE_OPTIONS=…` sets a preload for the commands after it.
+		if (name === "export" || name === "declare" || name === "typeset") {
+			for (const arg of args) if (ASSIGNMENT.test(arg)) await this.preload(arg, line, where);
+		}
 		if (name === undefined) {
 			await this.generic(generic, where);
 			return;
@@ -722,7 +771,9 @@ class Scanner {
 				i = end < 0 ? args.length : end;
 			}
 		} else if (base === "eval") {
-			await this.code(args.join(" "), "eval", line, where, nest, true);
+			// An `eval` that may not run changes the folder only maybe: unknown after it.
+			await this.code(args.join(" "), "eval", line, where, nest, !unsure);
+			if (unsure && CHANGES_DIR.test(args.join(" "))) where.cwd = undefined;
 		} else if (name.includes("/") || (project && SCRIPT_EXTENSIONS.has(extname(name).toLowerCase()))) {
 			await this.runs(name, line, where, false);
 		}
@@ -821,7 +872,7 @@ class Scanner {
 				return;
 			}
 			if (arg === "-m" && /^(python|pypy)/.test(base)) {
-				await this.module(args[i + 1], line, where);
+				await this.module(args[i + 1], args.slice(i + 2), line, where);
 				return;
 			}
 			// `-` reads the program from standard input; what follows are its arguments.
@@ -844,9 +895,17 @@ class Scanner {
 	}
 
 	/** `python -m name`: a module in the folder it runs in is read; an installed one is judged by its name, like a command on PATH. */
-	private async module(name: string | undefined, line: string, where: Where): Promise<void> {
+	private async module(name: string | undefined, rest: string[], line: string, where: Where): Promise<void> {
 		if (name === undefined || isDynamic(name)) {
 			this.note("indirect", line, "runs a module named at runtime");
+			return;
+		}
+		const top = name.split(".")[0] ?? "";
+		// `python -m pytest` runs the project's code as `pytest` does; `-m pip install` runs its build.
+		const verbs = CODE_RUNNERS[top];
+		const verb = rest.find((arg) => !arg.startsWith("-"));
+		if ((Object.hasOwn(CODE_RUNNERS, top) && (verbs === undefined || (verb !== undefined && verbs.includes(verb)))) || top === "unittest" || top === "nose2" || top === "build") {
+			this.note("indirect", line, "runs code from the project, or from packages it builds or installs, which the check does not read");
 			return;
 		}
 		if (where.cwd === undefined || !/^[\w.]+$/.test(name)) return;
@@ -922,7 +981,10 @@ class Scanner {
 			this.note("missing", how.shown, "may hold secrets, so it is not sent");
 			const kept = await readText(canonical, MAX_SCRIPT_BYTES);
 			if (kept.kind !== "text") return undefined;
-			if (!how.make && !onlyAssignments(kept.head)) this.note("indirect", how.shown, "runs commands from a file that may hold secrets, which the check does not see");
+			// Past the part read, it may run anything: say so, and let a `source` of it leave the folder unknown.
+			const whole = kept.size <= MAX_SCRIPT_BYTES;
+			if (!how.make && (!whole || !onlyAssignments(kept.head))) this.note("indirect", how.shown, "runs commands from a file that may hold secrets, which the check does not see");
+			if (!whole) return undefined;
 			this.texts.set(canonical, kept.head);
 			return kept.head;
 		}
@@ -955,7 +1017,9 @@ class Scanner {
 		if (!byName) file = await readText(canonical, MAX_SCRIPT_BYTES + REDACT_MARGIN);
 		if (file.kind !== "text") return undefined;
 		// Redact the whole read first, then cut in bytes, so the cut never splits a secret the margin holds whole.
-		const redacted = this.redact(file.head);
+		const redacted = maskSecrets(this.redactKnown(file.head), (name) =>
+			this.note("indirect", how.shown, `sets ${name} to a value that may be code; it was masked as a possible secret, so the check does not see it`, `${how.shown}\0${name}`),
+		);
 		const text = cutBytes(redacted, MAX_SCRIPT_BYTES);
 		const truncated = file.size > MAX_SCRIPT_BYTES || text.length < redacted.length;
 		this.scripts.push({ path: canonical, text, truncated });
@@ -1064,6 +1128,8 @@ class Scanner {
 		}
 		// npm runs `pre<name>` and `post<name>` around a script; the others do not by default.
 		const found = await this.packageScript(pm, name, dir, explicit || pm === "npm", line, where.depth + 1);
+		// `bun test` with no `test` script is bun's own test runner, which runs the project's test files.
+		if (!found && !explicit && pm === "bun" && verb === "test") this.note("indirect", line, "runs the test files it finds, which the check does not read");
 		if (found && workspaces) this.note("indirect", line, "also runs the script in workspace packages, which the check does not read");
 	}
 
@@ -1140,7 +1206,11 @@ class Scanner {
 		if (assigns.some((assign) => /^(GIT_DIR|GIT_COMMON_DIR|GIT_CONFIG\w*|GIT_EXEC_PATH)=/.test(assign))) dir = undefined;
 		if (verb === undefined) return;
 		if (settings.some((setting) => /^alias\./i.test(setting) && setting.includes("!"))) this.note("indirect", line, "runs a git alias that runs a shell command");
+		if (settings.some((setting) => COMMAND_SETTING.test(setting))) this.note("indirect", line, "sets git config on the command line that runs a command, which the check does not read");
 		const configs = await gitConfigs(dir);
+		for (const setting of configs === undefined ? [] : gitCommands(configs, NETWORK_VERBS.has(verb))) {
+			this.note("indirect", line, `runs a command git config sets (${setting}), which the check does not read`);
+		}
 		const alias = configs === undefined ? undefined : gitAlias(configs, verb);
 		if (alias?.startsWith("!")) {
 			this.note("indirect", line, `runs the git alias ${JSON.stringify(verb)}, which runs a shell command the check does not read`);
@@ -1254,8 +1324,8 @@ function changeDir(cwd: string | undefined, target: string | undefined): string 
 
 // Options that load a file before the program: node, bun, deno, tsx.
 const NODE_PRELOADS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"]);
-// A `cd`, `pushd`, or `popd` anywhere in a text.
-const CHANGES_DIR = /(^|[\s;&|(`{])(cd|pushd|popd)(\s|;|$)/m;
+// A `cd`, `pushd`, or `popd` anywhere in a text, or a `source` of another file that may hold one.
+const CHANGES_DIR = /(^|[\s;&|(`{])(cd|pushd|popd|source|\.)(\s|;|$)/m;
 
 /** `--name=value` as its name and value; any other word as itself. */
 function splitOption(word: string): [string, string | undefined] {
@@ -1276,21 +1346,49 @@ function secretLike(path: string): boolean {
 	return /(^|[._-])(secrets?|credentials?|creds|passw(or)?ds?|passwd|tokens?|api[_-]?keys?)([._-]|$)/i.test(name);
 }
 
-// A name whose value is a credential, in `NAME=value`, `NAME: value`, or `"name": "value"`, and its literal value.
-const SECRET_ASSIGNMENT = /(["']?\b[\w.-]*(?:secret|token|passw(?:or)?d|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)[\w.-]*["']?[ \t]*[:=][ \t]*)("[^"$`\n]*"|'[^'\n]*'|[^\s"'$`;&|()#,}]+)/gi;
-// Credential formats that are recognizable on their own, and passwords in URLs.
-const SECRET_VALUES = /\b(sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|glpat-[\w-]{20,}|xox[abprs]-[\w-]{10,}|AKIA[0-9A-Z]{16}|AIza[\w-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$))/g;
-const URL_PASSWORD = /(\b[a-z][\w+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi;
+// A name and its literal value, in `NAME=value`, `NAME: value`, or `"name": "value"`. Whether the name is a
+// credential's is decided in code, and the name is bounded, so matching stays linear in the text.
+const ASSIGNED = /(["']?)\b([A-Za-z_][\w.-]{0,63})\1[ \t]*[:=][ \t]*((?:Bearer|Basic|Token|Digest)[ \t]+[^\s"'`]{1,4096}|"[^"$`\n]*"|'[^'\n]*'|[^\s"'$`;&|()#,}]+)/gi;
+// Words of a name that hold a credential (`DB_PASSWORD`, `clientSecret`, `x-api-key`), and words that do with `key`.
+const CREDENTIAL_WORDS = new Set(["secret", "secrets", "token", "tokens", "password", "passwords", "passwd", "pwd", "pass", "passphrase", "credential", "credentials", "auth", "authorization", "apikey", "accesskey", "privatekey", "secretkey", "authtoken", "accesstoken", "refreshtoken", "clientsecret"]);
+const KEY_PREFIXES = new Set(["api", "access", "private", "secret", "signing", "encryption", "master"]);
+// Options that take a credential, and the user:password of curl's `-u`.
+const SECRET_OPTION = /(--(?:password|passwd|token|api-key|apikey|secret|auth-token|access-token)(?:[ \t]+|=))("[^"$`\n]*"|'[^'\n]*'|[^\s"'$`;&|()]+)/gi;
+const USER_PASSWORD = /((?:^|\s)(?:-u|--user)[ \t]+["']?[^\s:"'$/]{1,256}:)(?!\/\/)([^\s"'@$]{1,256})/g;
+const SSHPASS = /(\bsshpass[ \t]+-p[ \t]*)([^\s"'$]+|"[^"$\n]*"|'[^'\n]*')/g;
+// Credential formats that are recognizable on their own, private keys, and passwords in URLs (the user may be empty).
+const SECRET_VALUES = /\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,1024}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,1024}|gh[pousr]_[A-Za-z0-9]{20,1024}|github_pat_\w{20,1024}|glpat-[\w-]{20,1024}|npm_[A-Za-z0-9]{36,1024}|xox[abprs]-[\w-]{10,1024}|AKIA[0-9A-Z]{16}|AIza[\w-]{35}|eyJ[\w-]{8,2048}\.eyJ[\w-]{8,4096}\.[\w-]{8,2048})|-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]{0,64}PRIVATE KEY-----|$)/g;
+const URL_PASSWORD = /(\b[a-z][\w+.-]{0,31}:\/\/[^\s:/@]{0,256}:)[^\s@/]{1,256}@/gi;
+
+/** Whether a name is a credential's, by its words: `API_KEY` and `clientSecret` are; `AUTHOR` and `tokenizer` are not. */
+function credentialName(name: string): boolean {
+	const words = name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/[._-]+/);
+	return words.some((word, i) => CREDENTIAL_WORDS.has(word) || (KEY_PREFIXES.has(word) && words[i + 1] === "key"));
+}
 
 /**
  * Text with values that look like credentials replaced by `[REDACTED]`: literal values of names such as `API_KEY`
- * or `password`, known token formats, private keys, and passwords in URLs. secret_drop redacts only the values it
- * knows; this covers files that hold one it never saw. A value built at runtime (`$(…)`, `$VAR`) is kept, so what
- * the command runs stays visible.
+ * or `password`, credential options, known token formats, private keys, and passwords in URLs. secret_drop redacts
+ * only the values it knows; this covers files that hold one it never saw. A value built at runtime (`$(…)`, `$VAR`)
+ * and a path are kept, so what the command runs stays visible. A value that may be code (a git `!` helper, a
+ * `*_COMMAND`, anything with a space) is masked too, and `onCode` gets its name, so the scan can say the check did
+ * not see it.
  */
-export function maskSecrets(text: string): string {
+export function maskSecrets(text: string, onCode?: (name: string) => void): string {
+	const masked = (value: string) => (value.startsWith('"') ? '"[REDACTED]"' : value.startsWith("'") ? "'[REDACTED]'" : "[REDACTED]");
 	return text
-		.replace(SECRET_ASSIGNMENT, (_all, name: string, value: string) => `${name}${value.startsWith('"') ? '"[REDACTED]"' : value.startsWith("'") ? "'[REDACTED]'" : "[REDACTED]"}`)
+		.replace(ASSIGNED, (all, _quote: string, name: string, value: string) => {
+			if (!credentialName(name)) return all;
+			const scheme = /^(Bearer|Basic|Token|Digest)[ \t]+/i.exec(value);
+			if (scheme) return `${all.slice(0, all.length - value.length)}${scheme[0]}[REDACTED]`;
+			const inner = value.replace(/^(["'])([\s\S]*)\1$/, "$2");
+			if (/^(\.{0,2}\/|~\/)[^\s]*$/.test(inner)) return all;
+			if (/(cmd|command|helper|hook|process|exec)$/i.test(name) || inner.startsWith("!") || /\s/.test(inner)) onCode?.(name);
+			return `${all.slice(0, all.length - value.length)}${masked(value)}`;
+		})
+		.replace(SECRET_OPTION, (_all, option: string, value: string) => `${option}${masked(value)}`)
+		.replace(USER_PASSWORD, "$1[REDACTED]")
+		.replace(SSHPASS, (_all, option: string, value: string) => `${option}${masked(value)}`)
 		.replace(SECRET_VALUES, "[REDACTED]")
 		.replace(URL_PASSWORD, "$1[REDACTED]@");
 }
@@ -1403,9 +1501,59 @@ async function gitConfigs(dir: string | undefined): Promise<string[] | undefined
 	const texts: string[] = [];
 	for (const path of paths) {
 		const file = await readText(path, 64_000);
-		if (file.kind === "text") texts.push(file.head);
+		if (file.kind !== "text") continue;
+		texts.push(file.head);
+		// `[include]` and `[includeIf …]` files, one level deep: they can set hooks and aliases too.
+		for (const include of gitIncludes(file.head).slice(0, 8)) {
+			const included = await readText(resolve(dirname(path), expandHome(include)), 64_000);
+			if (included.kind === "text") texts.push(included.head);
+		}
 	}
 	return texts;
+}
+
+/** The `path` values of the `[include]` and `[includeIf …]` sections of a git config text. */
+function gitIncludes(config: string): string[] {
+	const paths: string[] = [];
+	let inInclude = false;
+	for (const line of config.split("\n")) {
+		const section = /^\s*\[\s*([^\]\s"]+)/.exec(line);
+		if (section) inInclude = /^include(if)?$/i.test(section[1] ?? "");
+		const entry = inInclude ? /^\s*path\s*=\s*(.*)$/i.exec(line) : null;
+		if (entry?.[1]) paths.push(entry[1].trim().replace(/^"(.*)"$/, "$1"));
+	}
+	return paths;
+}
+
+// `-c` settings that make git run a command.
+const COMMAND_SETTING = /^(credential\.(?:[^=]*\.)?helper=\s*!|core\.fsmonitor=(?!\s*(?:true|false|yes|no|on|off|0|1)?\s*$)|core\.sshcommand=|filter\.[^=]*\.(?:smudge|clean|process)=|diff\.[^=]*\.textconv=|merge\.[^=]*\.driver=)/i;
+// git commands that talk to a remote, which use credential helpers and the ssh command.
+const NETWORK_VERBS = new Set(["fetch", "pull", "push", "clone", "ls-remote", "remote", "submodule"]);
+
+/**
+ * Settings in git config texts that make git run a command: a shell credential helper (`!…`) and `core.sshCommand`
+ * (for commands that talk to a remote), `core.fsmonitor` set to a program, and filter, diff, and merge drivers.
+ * git-lfs's filter and a plain `ssh …` command are left out, as programs judged by their names.
+ */
+function gitCommands(configs: readonly string[], network: boolean): string[] {
+	const found = new Set<string>();
+	for (const config of configs) {
+		let section = "";
+		for (const line of config.split("\n")) {
+			const header = /^\s*\[\s*([^\]\s"]+)(?:\s+"([^"]*)")?/.exec(line);
+			if (header) section = (header[1] ?? "").toLowerCase();
+			const entry = /^\s*([\w-]+)\s*=\s*(.*)$/.exec(line);
+			if (!entry) continue;
+			const key = (entry[1] ?? "").toLowerCase();
+			const value = (entry[2] ?? "").trim().replace(/^"(.*)"$/, "$1");
+			if (network && section === "credential" && key === "helper" && value.startsWith("!")) found.add("credential.helper");
+			else if (network && section === "core" && key === "sshcommand" && !/^ssh(\s|$)/.test(value)) found.add("core.sshCommand");
+			else if (section === "core" && key === "fsmonitor" && !/^(true|false|yes|no|on|off|0|1)?$/i.test(value)) found.add("core.fsmonitor");
+			else if (section === "filter" && ["smudge", "clean", "process"].includes(key) && !value.startsWith("git-lfs ")) found.add(`filter ${key}`);
+			else if ((section === "diff" && key === "textconv") || (section === "merge" && key === "driver")) found.add(`${section}.${key}`);
+		}
+	}
+	return [...found];
 }
 
 /** The value of `alias.<name>` in git config texts, the last one winning, or undefined. */
