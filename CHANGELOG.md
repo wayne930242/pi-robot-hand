@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0
+
+- `robot_hand`: when pi has TypeSafe's Jev classifier (`typesafe/jev-latest`, in a pi with classifier models) and TypeSafe has a credential, Jev checks the command as the terminal selector opens. It reads the same redacted input as the `e` check (command, scripts, reason, the user's last message and later dialog answers, the untrusted log) and returns `match`, `partial`, or `mismatch` with probabilities, shown above the choices. `"jevCheck": false` in `~/.pi/agent/robot-hand.json` turns it off; it is on by default. A failure shows only the HTTP status, never the provider's text. Closing the selector aborts it. The verdict goes into the tool result and `details.jev`.
+- When the Jev check or the `e` check says `mismatch`, the selector adds "Report the mismatch and refuse". It works like "No, thanks" (places and runs nothing, leaves the agent's turn open) and also tells the agent the reason: `details.status: "refuse"`, and the result says a check found a mismatch, with each verdict. The published dialog settles as a cancel; its labels and digest are unchanged.
+
 ## 0.5.5
 
 - The `e` check also redacts secrets the user gave `secret_drop` with `format: "command"`. Those reach no file, so no registry records them; `secret_drop` now answers `secret-drop:redact` requests on pi's event bus with its in-session redactor, and the check runs every text through it as well as through the registry. The value never travels on the bus; when several extensions answer, each redacts what the earlier ones returned.

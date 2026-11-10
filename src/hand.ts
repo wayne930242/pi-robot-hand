@@ -4,7 +4,8 @@ import type { BusChoice } from "./dialog.ts";
 
 export type Kind = "shell" | "pi";
 export type Preferred = "prompt" | "clipboard" | "herdr-type" | "herdr-run";
-export type Choice = Preferred | "cancel";
+/** `refuse`: a decline like `cancel` that tells the agent the reason, a check's mismatch; only the terminal selector offers it. */
+export type Choice = Preferred | "cancel" | "refuse";
 
 /** Where the hand-over can go in this session. */
 export interface Reach {
@@ -77,6 +78,7 @@ const NOTES: Record<Choice, string | undefined> = {
 	"herdr-type": "Opens a pane with the command typed; press Enter there",
 	"herdr-run": "Runs it at once in a new pane",
 	cancel: undefined,
+	refuse: undefined,
 };
 
 // Which terminal opens once an answer is accepted. A pane choice also marks its pane with the answer's id (see startRun).
@@ -86,6 +88,7 @@ const NEXT: Record<Choice, { next: "terminal" } | { next: "pane"; tagged: true }
 	"herdr-type": { next: "pane", tagged: true },
 	"herdr-run": { next: "pane", tagged: true },
 	cancel: undefined,
+	refuse: undefined,
 };
 
 /** The choices as published on the dialog bus, each with its note and where it leads. */
@@ -110,6 +113,9 @@ export function resultText(choice: Choice, offer: Offer): string {
 	if (choice === "herdr-type" || choice === "herdr-run") {
 		const state = choice === "herdr-run" ? "It is running there" : "It runs when the user presses Enter there";
 		return `The command is in a new Herdr pane. ${state}; when it finishes, the pane closes and its output arrives as a new message. Wait for that message.`;
+	}
+	if (choice === "refuse") {
+		return "The user declined because a check found the command does not match your stated reason; nothing was placed or run. Ask how they want to proceed.";
 	}
 	return "The user declined; nothing was placed or run. Ask how they want to proceed.";
 }

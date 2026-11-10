@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { CheckResult } from "../src/check.ts";
-import { HandSelect } from "../src/hand-select.ts";
+import { HandSelect, type Picked } from "../src/hand-select.ts";
 
 const plain = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 
 function selector(check: (model: string, signal: AbortSignal) => Promise<CheckResult>) {
-	const picked: (number | undefined)[] = [];
+	const picked: Picked[] = [];
 	const select = new HandSelect(
 		{ title: "Robot Hand — r\n\n  ! ls", labels: ["a", "b", "c"], models: () => ["p/one", "p/two"], saved: () => "p/one", pick: () => {}, check },
 		plain,
@@ -42,4 +42,19 @@ test("a new check aborts the one still running, and closing aborts the last", ()
 	assert.equal(signals[1]?.aborted, false);
 	select.handleInput("\r");
 	assert.equal(signals[1]?.aborted, true);
+});
+
+test("the refuse choice leaves when a recheck no longer finds a mismatch, and the cursor follows", async () => {
+	const verdicts = ["mismatch", "match"] as const;
+	let call = 0;
+	const { select, picked } = selector(async () => ({ model: "p/one", verdict: verdicts[call++] ?? "match", does: "", gaps: "" }));
+	select.handleInput("e");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.match(select.render(80).join("\n"), /Report the mismatch and refuse/);
+	for (let i = 0; i < 5; i++) select.handleInput("j");
+	select.handleInput("e");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.doesNotMatch(select.render(80).join("\n"), /Report the mismatch/);
+	select.handleInput("\r");
+	assert.deepEqual(picked, [2]);
 });

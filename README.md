@@ -48,6 +48,16 @@ The list shows every model of each provider pi holds a credential for, even an e
 Known `secret_drop` values, both those in files it wrote and those fed to a command this session, are replaced with `[REDACTED]` before anything is sent; when its registry cannot be read, the check fails and sends nothing. The check informs your choice and never blocks one. When you checked, the agent's result says which model checked and its verdict.
 It needs the terminal UI.
 
+When pi has [TypeSafe](https://typesafe.ai)'s Jev classifier (a pi with classifier models, with `TYPESAFE_API_KEY` set or TypeSafe signed in through `/login`), Jev checks the command as the selector opens, without a key press. It reads the same redacted input as `e` and answers with a verdict and its probabilities, not an explanation:
+
+```
+ ✗ Jev: Does not match the stated intent (match 0.00, partial 0.00, mismatch 1.00)
+```
+
+Set `"jevCheck": false` in `~/.pi/agent/robot-hand.json` to turn it off; it is on by default. When Jev fails, the selector says so with the HTTP status only and the choices work as before.
+
+When either check says the command does not match, the selector adds **Report the mismatch and refuse**. It works like **No, thanks**, placing and running nothing, and also tells the agent the reason: the check found a mismatch, with each verdict. Another extension answering the selector never sees this choice.
+
 The agent sets `default` to choose which option the selector starts on, and picks the Herdr pane for commands that need terminal input.
 Options this session cannot offer are hidden: the clipboard outside the terminal UI, Herdr outside Herdr.
 The pane runs the command with your `PATH` but without your `.zshrc`, so shell aliases are not available.

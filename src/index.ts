@@ -11,10 +11,31 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { copyToClipboard, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type CheckInput, type CheckResult, afterUserMessage, checkSummary, failureNote, findScripts, lastUserText, loadCheckModel, loadDialogTools, loadSecrets, modelRef, orderModels, redactInput, runCheck, saveCheckModel, settingsPath, type Verdict } from "./check.ts";
+import {
+	afterUserMessage,
+	type CheckInput,
+	type CheckResult,
+	checkSummary,
+	failureNote,
+	findScripts,
+	jevClassifier,
+	lastUserText,
+	loadCheckModel,
+	loadDialogTools,
+	loadJevCheck,
+	loadSecrets,
+	modelRef,
+	orderModels,
+	redactInput,
+	runCheck,
+	runJevCheck,
+	saveCheckModel,
+	settingsPath,
+	type Verdict,
+} from "./check.ts";
 import { openDialog } from "./dialog.ts";
 import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, resultText, toOffer } from "./hand.ts";
-import { HandSelect } from "./hand-select.ts";
+import { HandSelect, type Picked } from "./hand-select.ts";
 import { redactThrough } from "./secret-drop/redact.ts";
 import { dialogOptions } from "./secret-drop/secret-input.ts";
 import { checkRun, cleanup, type Exec, findShell, type HerdrRun, outcomeText, startRun } from "./herdr.ts";
@@ -26,6 +47,8 @@ interface HandDetails {
 	answeredFrom?: "browser";
 	/** Present when the user ran the `e` check before choosing. */
 	check?: { model: string; verdict: Verdict };
+	/** Present when the automatic Jev check finished before the user chose. */
+	jev?: { model: string; verdict: Verdict };
 }
 
 export const HERDR_RESULT_TYPE = "robot-hand-herdr";
@@ -120,8 +143,8 @@ export function createRobotHand(
 			runs.clear();
 		});
 
-		// The terminal selector with the `e` check. Resolves with the picked index (undefined for Esc or abort)
-		// and the last finished check.
+		// The terminal selector with the `e` check and the automatic Jev check. Resolves with the picked index,
+		// `refuse`, or undefined for Esc or abort, and the last finished checks.
 		const pickInTerminal = async (
 			title: string,
 			labels: string[],
@@ -129,13 +152,22 @@ export function createRobotHand(
 			reason: string,
 			ctx: ExtensionContext,
 			signal: AbortSignal,
-		): Promise<{ index: number | undefined; check?: CheckResult }> => {
+		): Promise<{ picked: Picked; check?: CheckResult; jev?: CheckResult }> => {
 			const settings = settingsPath(agentDir);
 			let saved = loadCheckModel(settings);
 			let input: Promise<CheckInput> | undefined;
+			// Both checks read the same input, gathered once; a failed gathering is retried by the next check.
+			const gather = async (): Promise<CheckInput> => {
+				input ??= checkInput(offer, reason, ctx, agentDir, pi.events);
+				return input.catch((error: unknown) => {
+					input = undefined;
+					throw error;
+				});
+			};
+			const classify = loadJevCheck(settings) ? jevClassifier(ctx.modelRegistry) : undefined;
 			let select: HandSelect | undefined;
 			try {
-				const index = await ctx.ui.custom<number | undefined>((tui, theme, _keybindings, done) => {
+				const picked = await ctx.ui.custom<Picked>((tui, theme, _keybindings, done) => {
 					select = new HandSelect(
 						{
 							title,
@@ -150,11 +182,7 @@ export function createRobotHand(
 							check: async (ref, signal) => {
 								const model = ctx.modelRegistry.getAvailable().find((candidate) => modelRef(candidate) === ref);
 								if (!model) throw new Error("it is no longer signed in");
-								input ??= checkInput(offer, reason, ctx, agentDir, pi.events);
-								const gathered = await input.catch((error: unknown) => {
-									input = undefined;
-									throw error;
-								});
+								const gathered = await gather();
 								try {
 									const result = await runCheck((m, context, options) => ctx.modelRegistry.complete(m, context, options), model, gathered, signal);
 									failedProviders.delete(model.provider);
@@ -164,6 +192,16 @@ export function createRobotHand(
 									throw error;
 								}
 							},
+							...(classify
+								? {
+										jev: async (signal: AbortSignal) => {
+											const gathered = await gather();
+											// The user may have chosen while the input was gathered; send nothing then.
+											signal.throwIfAborted();
+											return runJevCheck(classify, gathered, signal);
+										},
+									}
+								: {}),
 						},
 						theme,
 						() => tui.requestRender(),
@@ -173,7 +211,7 @@ export function createRobotHand(
 					else signal.addEventListener("abort", () => select?.cancel(), { once: true });
 					return select;
 				}, dialogOptions());
-				return { index, check: select?.result };
+				return { picked, check: select?.result, jev: select?.jevResult };
 			} finally {
 				select?.cancel();
 			}
@@ -183,7 +221,7 @@ export function createRobotHand(
 			name: "robot_hand",
 			label: "Robot Hand",
 			description:
-				"Hand the user a command to run themselves. The user sees the command and the reason, then puts it in their pi prompt (a shell command becomes `! command`, whose output returns to the conversation when they press Enter), copies it to the clipboard, sends it to a new Herdr pane (closed when it finishes, its output returning as a message), or declines. In the terminal the user can first have another model check the command against your reason; the result then includes that verdict. The tool returns the user's choice; it never runs the command.",
+				"Hand the user a command to run themselves. The user sees the command and the reason, then puts it in their pi prompt (a shell command becomes `! command`, whose output returns to the conversation when they press Enter), copies it to the clipboard, sends it to a new Herdr pane (closed when it finishes, its output returning as a message), or declines. In the terminal the user can first have another model check the command against your reason, and Jev (TypeSafe) checks it automatically when configured; the result then includes each verdict, and after a mismatch the user can decline with that as the reason. The tool returns the user's choice; it never runs the command.",
 			promptSnippet: "Hand the user a command to run themselves, via their pi prompt, clipboard, or a Herdr pane",
 			promptGuidelines: [
 				"Use robot_hand when the user has to run a command themselves: pi slash commands such as /reload, interactive or sudo commands, commands a guard blocked, or anything they asked to run on their own.",
@@ -215,14 +253,18 @@ export function createRobotHand(
 					onUpdate?.({ content: [{ type: "text", text: "Waiting for the user to take the command..." }], details: { command: text, status: "waiting" } });
 					pi.events.emit("herdr:blocked", { active: true, label: "Waiting for the user to take a command" });
 					let won: number | undefined;
+					let refused = false;
 					let checked: CheckResult | undefined;
+					let jevChecked: CheckResult | undefined;
 					try {
 						const labels = choices.map((option) => option.label);
 						let at: number | undefined;
 						if (dialog.open && ctx.mode === "tui") {
 							const picked = await pickInTerminal(title, labels, offer, params.reason, ctx, dialog.signal);
-							at = picked.index;
+							at = typeof picked.picked === "number" ? picked.picked : undefined;
+							refused = picked.picked === "refuse";
 							checked = picked.check;
+							jevChecked = picked.jev;
 						} else if (dialog.open) {
 							const picked = await ctx.ui.select(title, labels, { signal: dialog.signal });
 							const found = labels.indexOf(picked ?? "");
@@ -233,7 +275,8 @@ export function createRobotHand(
 					} finally {
 						pi.events.emit("herdr:blocked", { active: false });
 					}
-					const choice = (won === undefined ? undefined : choices[won]?.choice) ?? "cancel";
+					// Refusing settles the published dialog as a cancel: other answerers never see that choice.
+					const choice = (won === undefined ? undefined : choices[won]?.choice) ?? (refused && !dialog.remote ? "refuse" : "cancel");
 
 					if (choice === "prompt") {
 						ctx.ui.setEditorText(text);
@@ -246,7 +289,7 @@ export function createRobotHand(
 						runs.set(run.token, { run, ticks: 0, busy: false });
 						timer ??= setInterval(watch, WATCH_MS);
 					}
-					const summary = checked ? `\n\n${checkSummary(checked)}` : "";
+					const summary = [jevChecked, checked].map((result) => (result ? `\n\n${checkSummary(result)}` : "")).join("");
 					return {
 						content: [{ type: "text", text: `${resultText(choice, offer)}${summary}` }],
 						details: {
@@ -254,9 +297,11 @@ export function createRobotHand(
 							status: choice,
 							...(dialog.remote ? { answeredFrom: "browser" } : {}),
 							...(checked ? { check: { model: checked.model, verdict: checked.verdict } } : {}),
+							...(jevChecked ? { jev: { model: jevChecked.model, verdict: jevChecked.verdict } } : {}),
 						} satisfies HandDetails,
-						// The next move is the user's; a follow-up from the agent would only talk over it.
-						terminate: choice !== "cancel",
+						// The next move is the user's; a follow-up from the agent would only talk over it. After a decline or
+						// refusal the agent answers.
+						terminate: choice !== "cancel" && choice !== "refuse",
 					};
 				} finally {
 					dialog.dispose();
@@ -277,11 +322,13 @@ export function createRobotHand(
 					return new Text(first?.type === "text" ? first.text : "", 0, 0);
 				}
 				if (details.status === "waiting") return new Text(theme.fg("dim", "Waiting for you to take the command"), 0, 0);
-				const checked = details.check ? theme.fg("dim", ` · checked by ${details.check.model}: ${details.check.verdict}`) : "";
+				const checks = [details.jev, details.check].filter((check) => check !== undefined);
+				const checked = checks.map((check) => theme.fg("dim", ` · checked by ${check.model}: ${check.verdict}`)).join("");
 				if (details.status === "prompt") return new Text(`${theme.fg("success", "✓ ")}In your prompt — press Enter to run it${checked}`, 0, 0);
 				if (details.status === "clipboard") return new Text(`${theme.fg("success", "✓ ")}Copied to your clipboard${checked}`, 0, 0);
 				if (details.status === "herdr-type") return new Text(`${theme.fg("success", "✓ ")}In a new Herdr pane — press Enter there to run it${checked}`, 0, 0);
 				if (details.status === "herdr-run") return new Text(`${theme.fg("success", "✓ ")}Running in a new Herdr pane${checked}`, 0, 0);
+				if (details.status === "refuse") return new Text(`${theme.fg("warning", "Declined as a mismatch — nothing placed or run")}${checked}`, 0, 0);
 				return new Text(`${theme.fg("warning", "Declined — nothing placed or run")}${checked}`, 0, 0);
 			},
 		});

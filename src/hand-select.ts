@@ -2,11 +2,13 @@
  * robot_hand's selector in the terminal: the hand-over title, the choices, and the `e` check.
  * `e` checks with the saved model, or opens the model list when none is saved, the saved one is
  * gone, or the last check failed; `E` always opens the list. The check never closes the selector.
+ * When Jev is available, it checks on its own as the selector opens. A mismatch from either check adds a
+ * choice to refuse the command and report the verdict to the agent.
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, decodeKittyPrintable, type Focusable, getKeybindings, isKeyRelease, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { CheckResult, Verdict } from "./check.ts";
+import { type CheckResult, probabilityText, type Verdict } from "./check.ts";
 
 export interface HandSelectProps {
 	/** The same title the plain selector shows: the reason, a blank line, then the command. */
@@ -22,9 +24,16 @@ export interface HandSelectProps {
 	pick: (model: string) => void;
 	/** Checks the command with a model; rejects with a message the user can act on. Aborted when superseded or closed. */
 	check: (model: string, signal: AbortSignal) => Promise<CheckResult>;
+	/** The automatic Jev check, started when the selector opens; absent when Jev is off or not configured. Aborted on close. */
+	jev?: (signal: AbortSignal) => Promise<CheckResult>;
 	/** Lines the selector may take; the command and check give way first. Default: 85% of the terminal. */
 	maxLines?: () => number;
 }
+
+/** What the selector closes with: a label's index, `refuse` for the mismatch choice, or undefined for Escape or abort. */
+export type Picked = number | "refuse" | undefined;
+
+export const REFUSE_LABEL = "Report the mismatch and refuse";
 
 type State =
 	| { kind: "idle" }
@@ -44,6 +53,8 @@ export class HandSelect implements Component, Focusable {
 	focused = false;
 	private cursor = 0;
 	private state: State = { kind: "idle" };
+	private jevState: State = { kind: "idle" };
+	private readonly jevRun = new AbortController();
 	private picker: { filter: string; cursor: number } | undefined;
 	private closed = false;
 	private running: AbortController | undefined;
@@ -51,13 +62,14 @@ export class HandSelect implements Component, Focusable {
 	readonly props: HandSelectProps;
 	private readonly theme: Theme;
 	private readonly requestRender: () => void;
-	private readonly done: (index: number | undefined) => void;
+	private readonly done: (picked: Picked) => void;
 
-	constructor(props: HandSelectProps, theme: Theme, requestRender: () => void, done: (index: number | undefined) => void) {
+	constructor(props: HandSelectProps, theme: Theme, requestRender: () => void, done: (picked: Picked) => void) {
 		this.props = props;
 		this.theme = theme;
 		this.requestRender = requestRender;
 		this.done = done;
+		if (props.jev) this.startJev(props.jev);
 	}
 
 	/** The last finished check, for the tool's result. */
@@ -65,16 +77,48 @@ export class HandSelect implements Component, Focusable {
 		return this.state.kind === "done" ? this.state.result : undefined;
 	}
 
+	/** Jev's finished check, for the tool's result. */
+	get jevResult(): CheckResult | undefined {
+		return this.jevState.kind === "done" ? this.jevState.result : undefined;
+	}
+
+	/** Whether a finished check says the command does not match; the refuse choice shows only then. */
+	private mismatch(): boolean {
+		return this.result?.verdict === "mismatch" || this.jevResult?.verdict === "mismatch";
+	}
+
+	/** The choices on screen: the labels, then the refuse choice while a check says mismatch. */
+	private rows(): string[] {
+		return this.mismatch() ? [...this.props.labels, REFUSE_LABEL] : [...this.props.labels];
+	}
+
+	private startJev(jev: (signal: AbortSignal) => Promise<CheckResult>): void {
+		this.jevState = { kind: "checking", model: "Jev" };
+		jev(this.jevRun.signal).then(
+			(result) => {
+				if (this.closed) return;
+				this.jevState = { kind: "done", result };
+				this.requestRender();
+			},
+			(error: unknown) => {
+				if (this.closed) return;
+				this.jevState = { kind: "failed", model: "Jev", error: error instanceof Error ? error.message : String(error) };
+				this.requestRender();
+			},
+		);
+	}
+
 	/** Closes without a choice, for example on abort or a remote answer. */
 	cancel(): void {
 		this.finish(undefined);
 	}
 
-	private finish(index: number | undefined): void {
+	private finish(picked: Picked): void {
 		if (this.closed) return;
 		this.closed = true;
 		this.running?.abort();
-		this.done(index);
+		this.jevRun.abort();
+		this.done(picked);
 	}
 
 	private listed(): string[] {
@@ -143,13 +187,15 @@ export class HandSelect implements Component, Focusable {
 			return;
 		}
 		const kb = getKeybindings();
-		const count = this.props.labels.length;
+		const count = this.rows().length;
+		// A recheck can take the refuse choice away from under the cursor.
+		this.cursor = Math.min(this.cursor, count - 1);
 		if (kb.matches(data, "tui.select.cancel")) {
 			this.finish(undefined);
 			return;
 		}
 		if (kb.matches(data, "tui.select.confirm") || data === "\n") {
-			this.finish(this.cursor);
+			this.finish(this.cursor < this.props.labels.length ? this.cursor : "refuse");
 			return;
 		}
 		// Like pi's selector: j and k move too, and the cursor stops at the ends.
@@ -171,6 +217,19 @@ export class HandSelect implements Component, Focusable {
 	}
 
 	invalidate(): void {}
+
+	private jevLines(inner: number): string[] {
+		const t = this.theme;
+		const wrap = (text: string) => wrapTextWithAnsi(text, inner);
+		const state = this.jevState;
+		if (state.kind === "checking") return wrap(t.fg("muted", "Jev is checking…"));
+		if (state.kind === "failed") return wrap(t.fg("dim", `Jev could not check: ${state.error}`));
+		if (state.kind !== "done") return [];
+		const { result } = state;
+		const mark = MARK[result.verdict];
+		const scores = result.probabilities ? probabilityText(result.probabilities) : "";
+		return wrap(`${t.bold(t.fg(mark.color, `${mark.icon} Jev: ${mark.text}`))}${scores ? t.fg("dim", ` (${scores})`) : ""}`);
+	}
 
 	private checkLines(inner: number): string[] {
 		const t = this.theme;
@@ -216,7 +275,9 @@ export class HandSelect implements Component, Focusable {
 		const [head = "", ...rest] = this.props.title.split("\n");
 		const heading = wrap(t.bold(t.fg("text", head)));
 		let command = rest.map((line) => t.fg("accent", line));
-		const choices = this.props.labels.map((label, i) => (i === this.cursor && !this.picker ? `${t.fg("accent", "› ")}${t.fg("accent", label)}` : `  ${t.fg("text", label)}`));
+		const listed = this.rows();
+		this.cursor = Math.min(this.cursor, listed.length - 1);
+		const choices = listed.map((label, i) => (i === this.cursor && !this.picker ? `${t.fg("accent", "› ")}${t.fg("accent", label)}` : `  ${t.fg("text", label)}`));
 		const saved = this.props.saved();
 		const help = wrap(
 			t.fg(
@@ -226,7 +287,7 @@ export class HandSelect implements Component, Focusable {
 					: `↑↓ move · Enter choose · e check with ${saved && this.state.kind !== "failed" ? saved : "a model"} · E change model · Esc cancel`,
 			),
 		);
-		const check = this.picker ? this.pickerLines(inner) : this.checkLines(inner);
+		const check = this.picker ? this.pickerLines(inner) : [...this.jevLines(inner), ...this.checkLines(inner)];
 
 		// Keep the choices and help on screen; the command gives way before the check does.
 		const budget = (this.props.maxLines ?? defaultMaxLines)() - 2;

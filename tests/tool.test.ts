@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { HandSelect } from "../src/hand-select.ts";
+import type { ClassifierResultLike, JevContext } from "../src/check.ts";
+import { HandSelect, type Picked, REFUSE_LABEL } from "../src/hand-select.ts";
 import { startMarker } from "../src/herdr.ts";
 import { createRobotHand, HERDR_RESULT_TYPE, WATCH_MS } from "../src/index.ts";
 
+const jevModel = { type: "classifier", provider: "typesafe", id: "jev-latest" };
 const plain = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 
 interface Harness {
@@ -39,6 +41,9 @@ async function run(
 		complete: (model: { provider: string; id: string }, context: Context) => Promise<Partial<AssistantMessage>>;
 		branch: unknown[];
 		current: string;
+		// Jev in pi's classifier registry: present when `classify` is set; `jevSignedIn` defaults to true.
+		classify: (model: unknown, context: JevContext, options?: { signal?: AbortSignal }) => Promise<ClassifierResultLike>;
+		jevSignedIn: boolean;
 		// Runs against the terminal selector before the pick, e.g. pressing `e`.
 		drive: (select: HandSelect) => Promise<void>;
 	}> = {},
@@ -74,6 +79,13 @@ async function run(
 		modelRegistry: {
 			getAvailable: () => setup.models ?? [],
 			complete: async (model: { provider: string; id: string }, context: Context) => ({ stopReason: "stop", content: [], ...(await setup.complete?.(model, context)) }),
+			...(setup.classify
+				? {
+						findOfType: (type: string, provider: string, id: string) => (type === "classifier" && provider === "typesafe" && id === "jev-latest" ? jevModel : undefined),
+						getProviderAuthStatus: (provider: string) => ({ configured: provider === "typesafe" && (setup.jevSignedIn ?? true) }),
+						classify: setup.classify,
+					}
+				: {}),
 		},
 		sessionManager: { getBranch: () => setup.branch ?? [] },
 		ui: {
@@ -88,14 +100,14 @@ async function run(
 			},
 			// The terminal selector: built as pi builds it, then driven by keys.
 			custom: async (factory: (...args: unknown[]) => HandSelect) => {
-				let result: number | undefined | null = null;
-				const select = factory({ requestRender: () => {} }, plain, {}, (value: number | undefined) => {
+				let result: Picked | null = null;
+				const select = factory({ requestRender: () => {} }, plain, {}, (value: Picked) => {
 					result = value;
 				});
 				harness.selects.push({ title: select.props.title, options: [...select.props.labels] });
 				harness.screens.push(() => select.render(100).join("\n"));
 				await setup.drive?.(select);
-				const at = pick ? select.props.labels.findIndex((label) => pick.test(label)) : -1;
+				const at = pick ? [...select.props.labels, REFUSE_LABEL].findIndex((label) => pick.test(label)) : -1;
 				if (at < 0) select.handleInput("\x1b");
 				else {
 					for (let i = 0; i < at; i++) select.handleInput("\x1b[B");
@@ -334,4 +346,107 @@ test("a provider whose check failed is marked and listed last; the current provi
 	});
 	assert.deepEqual(listed[0], ["openai/luna", "anthropic/haiku", "google/flash"]);
 	assert.deepEqual(listed[1], ["openai/luna", "google/flash", "anthropic/haiku (saved, sign-in failed)"]);
+});
+
+const jevSays = (choice: string, probabilities: Record<string, number> = {}) => async (): Promise<ClassifierResultLike> => ({
+	stopReason: "stop",
+	answers: { verdict: { type: "choice", choice, probabilities } },
+});
+
+test("Jev checks on its own when the selector opens; after a mismatch the user can refuse and the agent hears why", async () => {
+	const calls: { model: unknown; context: JevContext; signal?: AbortSignal }[] = [];
+	let screen = "";
+	const { harness, result, text } = await run({ command: "rm -rf build", reason: "只看建置結果" }, /Report the mismatch/, {
+		editor: "keep me",
+		branch: [{ type: "message", message: { role: "user", content: [{ type: "text", text: "幫我看建置結果" }] } }],
+		classify: async (model, context, options) => {
+			calls.push({ model, context, signal: options?.signal });
+			return jevSays("mismatch", { match: 0.05, partial: 0.15, mismatch: 0.8 })();
+		},
+		drive: async (select) => {
+			screen = await until(select, /Jev: Does not match/);
+		},
+	});
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]?.model, jevModel);
+	assert.equal(calls[0]?.context.state.command, "rm -rf build");
+	assert.equal(calls[0]?.context.state.reason, "只看建置結果");
+	assert.equal(calls[0]?.context.state.userMessage, "幫我看建置結果");
+	assert.deepEqual(Object.keys(calls[0]?.context.questions.verdict.criteria ?? {}), ["match", "partial", "mismatch"]);
+	assert.equal(calls[0]?.signal?.aborted, true, "closing the selector aborts Jev");
+	assert.match(screen, /✗ Jev: Does not match the stated intent \(match 0\.05, partial 0\.15, mismatch 0\.80\)/);
+	assert.match(screen, new RegExp(`No, thanks[\\s│]*${REFUSE_LABEL}`));
+	assert.equal(harness.editor, "keep me");
+	assert.deepEqual(harness.copied, []);
+	assert.match(text, /declined because a check found the command does not match.*typesafe\/jev-latest checked.*verdict: mismatch \(match 0\.05, partial 0\.15, mismatch 0\.80\)/s);
+	assert.equal(result.terminate, false);
+	assert.deepEqual(result.details, { command: "! rm -rf build", status: "refuse", jev: { model: "typesafe/jev-latest", verdict: "mismatch" } });
+});
+
+test("a Jev match offers no refuse choice and its verdict rides along with the user's choice", async () => {
+	let screen = "";
+	const { harness, result, text } = await run({ command: "ls", reason: "看檔案" }, /prompt/, {
+		classify: jevSays("match", { match: 0.9, partial: 0.08, mismatch: 0.02 }),
+		drive: async (select) => {
+			screen = await until(select, /✓ Jev: Matches/);
+		},
+	});
+	assert.doesNotMatch(screen, /Report the mismatch/);
+	assert.equal(harness.editor, "! ls");
+	assert.match(text, /verdict: match \(match 0\.90/);
+	assert.deepEqual((result.details as { jev?: unknown }).jev, { model: "typesafe/jev-latest", verdict: "match" });
+	assert.equal(result.terminate, true);
+});
+
+test("Jev stays off when jevCheck is false or TypeSafe has no credential", async () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "robot-hand-agent-"));
+	writeFileSync(join(agentDir, "robot-hand.json"), JSON.stringify({ jevCheck: false }));
+	for (const setup of [{ agentDir }, { jevSignedIn: false }]) {
+		let called = 0;
+		let screen = "";
+		const { text } = await run({ command: "ls", reason: "x" }, /prompt/, {
+			...setup,
+			classify: async () => {
+				called++;
+				return jevSays("mismatch")();
+			},
+			drive: async (select) => {
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				screen = select.render(100).join("\n");
+			},
+		});
+		assert.equal(called, 0);
+		assert.doesNotMatch(screen, /Jev/);
+		assert.doesNotMatch(text, /Jev|jev-latest/);
+	}
+});
+
+test("a Jev failure shows only the status, never the provider's text, and the choices keep working", async () => {
+	let screen = "";
+	const { harness, text } = await run({ command: "ls", reason: "x" }, /prompt/, {
+		classify: async () => ({ stopReason: "error", errorMessage: "TypeSafe API error (401): echo of rm -rf build" }),
+		drive: async (select) => {
+			screen = await until(select, /Jev could not check/);
+		},
+	});
+	assert.match(screen, /Jev could not check: TypeSafe returned HTTP 401/);
+	assert.doesNotMatch(screen, /echo of/);
+	assert.equal(harness.editor, "! ls");
+	assert.doesNotMatch(text, /verdict/);
+});
+
+test("an e check's mismatch alone also offers the refuse choice", async () => {
+	const agentDir = mkdtempSync(join(tmpdir(), "robot-hand-agent-"));
+	writeFileSync(join(agentDir, "robot-hand.json"), JSON.stringify({ checkModel: "openai/luna" }));
+	const { result, text } = await run({ command: "rm -rf build", reason: "看檔案" }, /Report the mismatch/, {
+		agentDir,
+		models: [{ provider: "openai", id: "luna" }],
+		complete: answer('{"verdict":"mismatch","does":"刪除 build。","gaps":"說是看檔案。"}'),
+		drive: async (select) => {
+			select.handleInput("e");
+			await until(select, /Report the mismatch and refuse/);
+		},
+	});
+	assert.equal((result.details as { status?: string }).status, "refuse");
+	assert.match(text, /declined because.*openai\/luna.*verdict: mismatch.*刪除 build。/s);
 });
