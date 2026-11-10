@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+
+- git config is read the way git reads it where that is safe, and over-read where it is not, so a setting that runs code cannot hide in an odd layout: CRLF line ends, escaped quotes in section names, old `[section.sub]` headers, entries on the header's line, and the config read both with and without backslash line continuation (only CRLF or LF ends a line; a lone CR does not). Every value of a setting counts, not the last one. Fixes a 0.7.0 case where `[filter "a\"b"]` hid its filter command.
+- git aliases are no longer resolved. When the command names an alias (`alias.<name>`, `[alias "<name>"] command`, or `-c alias.<name>=`), any alias in the config that runs a shell (`!`) gets the shell note, and hooks are checked when any alias value names a hook verb, whatever its quotes, escapes, comments, or chain of aliases. `-n` skips commit's hooks only when commit is the one verb the alias may reach. `GIT_CONFIG_*` and `--config-env` give a "git config set at runtime" note. The check stays linear in the config's size.
+
 ## 0.7.0
 
 - The selector lists what the checks could not read, found by code and shown whatever a verdict says: **Not readable** (a file the command runs is missing, not a regular file, a project binary, or protected by `secret_drop`), **Not followed** (code from a download piped to a shell, standard input, a process substitution, a runtime path or command name, a glob, a package `npx`/`dlx` may download, install scripts, or a task runner such as `just`), **Read in part** (a file over 16 KB, with its size), and **Not read** (past the five-file or three-level limit). Before, such files were skipped silently, and a check judged from the command's words alone.
