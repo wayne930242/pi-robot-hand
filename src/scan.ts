@@ -1226,7 +1226,7 @@ class Scanner {
 			this.note("indirect", line, "may run git hooks of a repository set at runtime, which the check does not read");
 			return;
 		}
-		if (configs.some((config) => /^\s*hookspath\s*=/im.test(config))) {
+		if (configs.some((config) => gitEntries(config).some(({ section, key }) => section === "core" && key === "hookspath"))) {
 			this.note("indirect", line, "runs git hooks (from core.hooksPath), which the check does not read");
 			return;
 		}
@@ -1514,15 +1514,26 @@ async function gitConfigs(dir: string | undefined): Promise<string[] | undefined
 
 /** The `path` values of the `[include]` and `[includeIf …]` sections of a git config text. */
 function gitIncludes(config: string): string[] {
-	const paths: string[] = [];
-	let inInclude = false;
+	return gitEntries(config)
+		.filter(({ section, key }) => (section === "include" || section === "includeif") && key === "path")
+		.map(({ value }) => value);
+}
+
+/**
+ * The entries of a git config text, as section (lower case, without a subsection), key (lower case), and value
+ * (outer quotes removed). As git reads it: a subsection may hold escaped quotes (`[filter "a\"b"]`), the old
+ * `[section.sub]` form names `section`, and an entry may follow its header on the same line.
+ */
+function gitEntries(config: string): { section: string; key: string; value: string }[] {
+	const entries: { section: string; key: string; value: string }[] = [];
+	let section = "";
 	for (const line of config.split("\n")) {
-		const section = /^\s*\[\s*([^\]\s"]+)/.exec(line);
-		if (section) inInclude = /^include(if)?$/i.test(section[1] ?? "");
-		const entry = inInclude ? /^\s*path\s*=\s*(.*)$/i.exec(line) : null;
-		if (entry?.[1]) paths.push(entry[1].trim().replace(/^"(.*)"$/, "$1"));
+		const header = /^\s*\[\s*([^\]\s"]+)(?:\s+"(?:[^"\\\n]|\\.)*")?\s*\]/.exec(line);
+		if (header) section = (header[1] ?? "").split(".")[0]?.toLowerCase() ?? "";
+		const entry = /^\s*([\w-]+)\s*=\s*(.*)$/.exec(header ? line.slice(header[0].length) : line);
+		if (entry) entries.push({ section, key: (entry[1] ?? "").toLowerCase(), value: (entry[2] ?? "").trim().replace(/^"(.*)"$/, "$1") });
 	}
-	return paths;
+	return entries;
 }
 
 // `-c` settings that make git run a command.
@@ -1538,15 +1549,7 @@ const NETWORK_VERBS = new Set(["fetch", "pull", "push", "clone", "ls-remote", "r
 function gitCommands(configs: readonly string[], network: boolean): string[] {
 	const found = new Set<string>();
 	for (const config of configs) {
-		let section = "";
-		for (const line of config.split("\n")) {
-			const header = /^\s*\[\s*([^\]\s"]+)(?:\s+"[^"]*")?\s*\]/.exec(line);
-			if (header) section = (header[1] ?? "").toLowerCase();
-			// An entry may follow its section header on the same line: `[core] fsmonitor = …`.
-			const entry = /^\s*([\w-]+)\s*=\s*(.*)$/.exec(header ? line.slice(header[0].length) : line);
-			if (!entry) continue;
-			const key = (entry[1] ?? "").toLowerCase();
-			const value = (entry[2] ?? "").trim().replace(/^"(.*)"$/, "$1");
+		for (const { section, key, value } of gitEntries(config)) {
 			if (network && section === "credential" && key === "helper" && value.startsWith("!")) found.add("credential.helper");
 			else if (network && section === "core" && key === "sshcommand" && !/^ssh(\s|$)/.test(value)) found.add("core.sshCommand");
 			else if (section === "core" && key === "fsmonitor" && !/^(true|false|yes|no|on|off|0|1)?$/i.test(value)) found.add("core.fsmonitor");
@@ -1561,13 +1564,7 @@ function gitCommands(configs: readonly string[], network: boolean): string[] {
 function gitAlias(configs: readonly string[], name: string): string | undefined {
 	let found: string | undefined;
 	for (const config of configs) {
-		let inAlias = false;
-		for (const line of config.split("\n")) {
-			const section = /^\s*\[\s*([^\]\s"]+)/.exec(line);
-			if (section) inAlias = section[1]?.toLowerCase() === "alias";
-			const entry = inAlias ? /^\s*([\w-]+)\s*=\s*(.*)$/.exec(line) : null;
-			if (entry && entry[1]?.toLowerCase() === name.toLowerCase()) found = (entry[2] ?? "").trim().replace(/^"(.*)"$/, "$1");
-		}
+		for (const { section, key, value } of gitEntries(config)) if (section === "alias" && key === name.toLowerCase()) found = value;
 	}
 	return found;
 }

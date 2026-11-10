@@ -549,6 +549,13 @@ test("round 3: git config that runs commands, from -c, the repository, and inclu
 		assert.match(kinds((await findScripts("git status", lfs, never)).unread).join("\n"), /\(filter clean\)/);
 		const inline = folder({ ".git/config": "[core] fsmonitor = ./evil.sh\n" });
 		assert.match(kinds((await findScripts("git status", inline, never)).unread).join("\n"), /\(core\.fsmonitor\)/);
+		// As git reads headers: escaped quotes in a subsection, the old dotted form, and entries on the header's line.
+		for (const config of ['[filter "a\\"b"]\nclean = ./evil\n', '[core]\n[filter "a\\"b"] clean = ./evil\n', "[filter.x]\nclean = ./evil\n"]) {
+			assert.match(kinds((await findScripts("git status", folder({ ".git/config": config }), never)).unread).join("\n"), /\(filter clean\)/, config);
+		}
+		const sameLine = folder({ ".git/config": "[alias] st = !./evil.sh\n[core] hooksPath = h\n" });
+		assert.match(kinds((await findScripts("git st", sameLine, never)).unread).join("\n"), /git alias "st"/);
+		assert.match(kinds((await findScripts("git commit -m x", sameLine, never)).unread).join("\n"), /from core\.hooksPath/);
 		assert.match(kinds((await findScripts("git commit -m x", dir, never)).unread).join("\n"), /from core\.hooksPath/);
 		assert.match(kinds((await findScripts("git -c core.sshCommand='./s' fetch", folder(), never)).unread).join("\n"), /sets git config on the command line that runs a command/);
 	} finally {
