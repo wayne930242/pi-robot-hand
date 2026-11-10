@@ -4,6 +4,7 @@
 
 - git hooks are matched to the git commands that run them, from a table of git's hooks, instead of a short list of commands: `reference-transaction` for any command that updates a ref (`branch`, `tag`, `fetch`, `reset`, `stash`, …), `post-index-change` for any command (`git add`, and `git status` when it refreshes the index), `post-checkout` for `clone`, `worktree`, and `bisect` too, `pre-auto-gc` for `gc` and `fetch`. A git command the scan does not know, and an alias whose values name none it knows, may run every hook. A `core.hooksPath` folder is listed from the top of the work tree and filtered the same way, so a husky repository's `git status` is not flagged; a folder the scan cannot list is still reported. Other files with a hook-like name are counted, never shown.
 - `-n` skips commit's hooks only for commit: an alias set that also defines `co = checkout` no longer keeps them in the list.
+- After the user refuses a command as a mismatch, the result tells the agent its two ways forward: change the command so it does only what was asked, or hand it again with a reason that states everything it does, including what the check found missing, so the user can judge it. It is told not to reword the reason only to pass the check, and to ask the user when the command goes against their request. Before, it was only told to ask.
 - A test that read the saved check model before its background write finished now waits for it.
 
 ## 0.7.1

@@ -72,7 +72,7 @@ What a check cannot read, the selector lists above the verdicts, whatever the ve
 Both checks get the list. While it is not empty, neither can answer match: a match becomes partial, shown as "Matches what it read; parts it could not read", and the agent's result names what was not read.
 File names, the checker's words, and the command are drawn with terminal controls, carriage returns, and bidirectional or invisible characters shown as `\u{…}` escapes, so none of them can redraw the selector; names reach the checker as JSON strings.
 
-When either check says the command does not match, the selector adds **Report the mismatch and refuse**. It works like **No, thanks**, placing and running nothing, and also tells the agent the reason: the check found a mismatch, with each verdict. Another extension answering the selector never sees this choice.
+When either check says the command does not match, the selector adds **Report the mismatch and refuse**. It works like **No, thanks**, placing and running nothing, and also tells the agent the reason: the check found a mismatch, with each verdict. The agent may then hand the command again in one of two ways: change the command so it does only what was asked, or keep it and give a reason that states everything it does, including what the check found missing, so you can judge it. It is told not to reword the reason only to pass the check, and to ask you when the command goes against your request. Another extension answering the selector never sees this choice.
 
 The agent sets `default` to choose which option the selector starts on, and picks the Herdr pane for commands that need terminal input.
 Options this session cannot offer are hidden: the clipboard outside the terminal UI, Herdr outside Herdr.

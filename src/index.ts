@@ -244,6 +244,7 @@ export function createRobotHand(
 				"Make the robot_hand reason say what the command does and what it is for: the user can press e to have another model check the command and the scripts it runs against that reason.",
 				"Set robot_hand `default` to herdr-type for a command that needs terminal input (password, sudo, confirmation, ssh, a full-screen program); pi's `!` gives it no terminal.",
 				"After robot_hand places, copies, or sends a command, nothing has run yet: wait for the user or the result message instead of assuming the result.",
+				"After the user refuses a robot_hand command as a mismatch, either change the command or hand it again with a reason that states all it does, as the result says; never reword the reason only to pass the check.",
 			],
 			parameters: Params,
 			executionMode: "sequential",

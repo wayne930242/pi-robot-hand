@@ -381,6 +381,8 @@ test("Jev checks on its own when the selector opens; after a mismatch the user c
 	assert.equal(harness.editor, "keep me");
 	assert.deepEqual(harness.copied, []);
 	assert.match(text, /declined because a check found the command does not match.*typesafe\/jev-latest checked.*verdict: mismatch \(match 0\.05, partial 0\.15, mismatch 0\.80\)/s);
+	assert.match(text, /\(1\) change the command so it does only what the user asked.*\(2\) if the command is right, give a reason that states everything it does/s);
+	assert.match(text, /Do not word the reason to win a match/);
 	assert.equal(result.terminate, false);
 	assert.deepEqual(result.details, { command: "! rm -rf build", status: "refuse", jev: { model: "typesafe/jev-latest", verdict: "mismatch" } });
 });

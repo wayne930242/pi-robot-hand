@@ -115,7 +115,11 @@ export function resultText(choice: Choice, offer: Offer): string {
 		return `The command is in a new Herdr pane. ${state}; when it finishes, the pane closes and its output arrives as a new message. Wait for that message.`;
 	}
 	if (choice === "refuse") {
-		return "The user declined because a check found the command does not match your stated reason; nothing was placed or run. Ask how they want to proceed.";
+		return [
+			"The user declined because a check found the command does not match your stated reason; nothing was placed or run. The verdicts below say what the command does and where it differs from the reason.",
+			"You may hand it again with robot_hand, one of two ways: (1) change the command so it does only what the user asked; or (2) if the command is right, give a reason that states everything it does, including what the check found missing (deletes, overwrites, network access, deploys, scripts it runs), so the user can judge whether to run it.",
+			"Do not word the reason to win a match or to hide what the command does: the user decides, and the check only helps them see. If the check says the command goes against the user's request, or neither way fits, ask the user how they want to proceed.",
+		].join(" ");
 	}
 	return "The user declined; nothing was placed or run. Ask how they want to proceed.";
 }
