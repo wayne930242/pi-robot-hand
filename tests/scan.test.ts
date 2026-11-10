@@ -450,9 +450,10 @@ test("re-review: git hooks from -c, aliases that run a shell, and hooks --no-ver
 		assert.match(kinds((await findScripts("git -c core.hooksPath=h status", dir, never)).unread).join(""), /^$/);
 		assert.match(kinds((await findScripts("git -c core.hooksPath=h commit -m x", dir, never)).unread).join("\n"), /hooks from a folder set on the command line/);
 		const alias = await findScripts("git st", dir, never);
-		assert.match(kinds(alias.unread).join("\n"), /runs the git alias "st", which runs a shell command/);
+		assert.match(kinds(alias.unread).join("\n"), /runs the git alias "st"; the git config has aliases that run a shell command/);
 		assert.doesNotMatch(JSON.stringify(alias), /hunter2/);
-		assert.deepEqual(kinds((await findScripts("git ci -m x", dir, never)).unread), ["indirect git ci -m x: runs git hooks (post-commit, pre-commit), which the check does not read"]);
+		// Any alias in the config may be reached through another, so with `st = !…` defined, every alias counts as a shell.
+		assert.deepEqual(kinds((await findScripts("git ci -m x", dir, never)).unread), ['indirect git ci -m x: runs the git alias "ci"; the git config has aliases that run a shell command, which the check does not read']);
 		assert.deepEqual(kinds((await findScripts("git commit --no-verify -m x", dir, never)).unread), ["indirect git commit --no-verify -m x: runs git hooks (post-commit), which the check does not read"]);
 		assert.match(kinds((await findScripts("GIT_DIR=/x git commit -m x", dir, never)).unread).join(""), /repository set at runtime/);
 	} finally {
@@ -600,10 +601,21 @@ test("git config is read as git does, with no user config: CRLF, continued lines
 			assert.match(kinds((await findScripts("git ci -m x", hooked(config), never)).unread).join("\n"), /runs git hooks \(pre-commit\)/, config);
 		}
 		assert.match(kinds((await findScripts("git ci", folder({ ".git/config": '[alias "ci"]\n\tcommand = !./evil.sh\n' }), never)).unread).join("\n"), /git alias "ci"/);
+		// Escaped tabs and newlines split words; any alias the config defines counts, whatever its name; long values stay fast.
+		for (const config of ["[alias]\n\tci = -p\\tcommit\n", "[alias]\n\tci = -p\\ncommit\n", '[alias]\n\tci = x+y\n[alias "x+y"]\n\tcommand = commit\n']) {
+			assert.match(kinds((await findScripts("git ci -m x", hooked(config), never)).unread).join("\n"), /runs git hooks \(pre-commit\)/, config);
+		}
+		for (const config of ["[alias]\n\tci = -p\\tco\n\tco = !echo hi\n", '[alias]\n\tci = x+y\n[alias "x+y"]\n\tcommand = !echo hi\n']) {
+			assert.match(kinds((await findScripts("git ci", folder({ ".git/config": config }), never)).unread).join("\n"), /git alias "ci"/, config);
+		}
+		const words = Array.from({ length: 12_000 }, (_, i) => `w${i}`).join(" ");
+		const started = Date.now();
+		await findScripts("git ci", folder({ ".git/config": `[alias]\n\tci = ${words}\n` }), never);
+		assert.ok(Date.now() - started < 1000, `${Date.now() - started} ms`);
 		// A hook verb counts as a word, not inside another word such as `name`.
 		assert.deepEqual((await findScripts("git lg", hooked("[alias]\n\tlg = log --name-only --stat\n"), never)).unread, []);
 		const chain = Array.from({ length: 40 }, (_, i) => `\ta${i + 1} = a${i + 2}\n`).join("");
-		assert.match(kinds((await findScripts("git a1", folder({ ".git/config": `[alias]\n${chain}\ta41 = commit\n` }), never)).unread).join("\n"), /chain of git aliases too long/);
+		assert.match(kinds((await findScripts("git a1 -m x", hooked(`[alias]\n${chain}\ta41 = commit\n`), never)).unread).join("\n"), /runs git hooks \(pre-commit\)/);
 		// A backslash in a comment does not continue the line, and a lone CR does not end one: still found.
 		for (const config of ["[core]\n\ta = x ; c \\\n\thooksPath = ./h\n", "[x]\n# c \\\n[core]\n\thooksPath = ./h\n", "[core]\n\tfoo = 1\r[x]\n\thooksPath = ./h\n"]) {
 			assert.match(kinds((await findScripts("git commit -m x", folder({ ".git/config": config }), never)).unread).join("\n"), /from core\.hooksPath/, JSON.stringify(config));

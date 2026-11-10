@@ -1219,32 +1219,23 @@ class Scanner {
 		}
 		// Every value an alias may have, not the one git would pick, through chains of aliases, from `-c` and the
 		// config files: the scan reads the config two ways and does not unquote as git does, so any candidate counts.
-		// git's own splitting (quotes, escapes, comments) is not reproduced: every word of a value may name the next
-		// alias, and a value that mentions a hook verb anywhere counts as running it.
-		const lookup = (name: string): string[] => {
-			const lower = name.toLowerCase();
-			const fromLine = settings
-				.filter((setting) => setting.toLowerCase().startsWith(`alias.${lower}=`) || setting.toLowerCase().startsWith(`alias.${lower}.command=`))
-				.map((setting) => setting.slice(setting.indexOf("=") + 1));
-			return [...fromLine, ...(configs === undefined ? [] : gitAliases(configs, name))];
-		};
-		const names = [verb];
-		const values: string[] = [];
-		for (let i = 0; i < names.length; i++) {
-			if (i >= MAX_ALIASES) {
-				this.note("indirect", line, "follows a chain of git aliases too long for the check to read");
+		// Which alias git would run, and through which others, is not worked out: git splits and unquotes values in ways
+		// the scan does not reproduce. When the command names an alias, every alias the config defines counts: any `!`
+		// in one is a shell command, and a hook verb anywhere in one may run hooks.
+		const fromLine = settings
+			.filter((setting) => /^alias\.[^=]+=/i.test(setting))
+			.map((setting) => ({ name: setting.slice(6, setting.indexOf("=")).replace(/\.command$/i, "").toLowerCase(), value: setting.slice(setting.indexOf("=") + 1) }));
+		const aliases = [...fromLine, ...(configs === undefined ? [] : gitAliases(configs))];
+		let effective = HOOK_VERBS.has(verb) ? verb : undefined;
+		if (aliases.some(({ name }) => name === verb.toLowerCase())) {
+			if (aliases.some(({ value }) => value.includes("!"))) {
+				this.note("indirect", line, `runs the git alias ${JSON.stringify(verb)}; the git config has aliases that run a shell command, which the check does not read`);
 				return;
 			}
-			for (const value of lookup(names[i] ?? "")) {
-				values.push(value);
-				for (const word of value.replace(/["'\\]/g, "").split(/[^\w.-]+/)) if (word && !names.includes(word)) names.push(word);
-			}
+			// Two readings of each value: escapes as word breaks (`\t`, `\n`), and quotes and backslashes removed (`'com'mit`).
+			const readings = aliases.flatMap(({ value }) => [value.replace(/\\./g, " "), value.replace(/["'\\]/g, "")]);
+			effective ??= [...HOOK_VERBS].find((hook) => readings.some((reading) => new RegExp(`(^|[^a-z-])${hook}($|[^a-z-])`, "i").test(reading)));
 		}
-		if (values.some((value) => value.includes("!"))) {
-			this.note("indirect", line, `runs the git alias ${JSON.stringify(verb)}, which runs a shell command the check does not read`);
-			return;
-		}
-		const effective = HOOK_VERBS.has(verb) ? verb : [...HOOK_VERBS].find((hook) => values.some((value) => new RegExp(`(^|[^a-z-])${hook}($|[^a-z-])`).test(value.replace(/["'\\]/g, ""))));
 		if (effective === undefined) return;
 		if (settings.some((setting) => /^core\.hookspath=/i.test(setting))) {
 			this.note("indirect", line, "runs git hooks from a folder set on the command line, which the check does not read");
@@ -1587,8 +1578,6 @@ interface GitEntry {
 
 // `-c` settings that make git run a command.
 const COMMAND_SETTING = /^(credential\.(?:[^=]*\.)?helper=\s*!|core\.fsmonitor=(?!\s*(?:true|false|yes|no|on|off|0|1)?\s*$)|core\.sshcommand=|filter\.[^=]*\.(?:smudge|clean|process)=|diff\.[^=]*\.textconv=|merge\.[^=]*\.driver=)/i;
-// git aliases followed from one command, through chains; past this the command is reported.
-const MAX_ALIASES = 32;
 // git commands that talk to a remote, which use credential helpers and the ssh command.
 const NETWORK_VERBS = new Set(["fetch", "pull", "push", "clone", "ls-remote", "remote", "submodule"]);
 
@@ -1611,13 +1600,14 @@ function gitCommands(configs: readonly string[], network: boolean): string[] {
 	return [...found];
 }
 
-/** Every value of `alias.<name>` in git config texts, in either reading of each. */
-function gitAliases(configs: readonly string[], name: string): string[] {
-	const found: string[] = [];
+/** Every alias in git config texts, in either reading of each: `alias.<name>`, or `[alias "<name>"] command = …`. */
+function gitAliases(configs: readonly string[]): { name: string; value: string }[] {
+	const found: { name: string; value: string }[] = [];
 	for (const config of configs) {
 		for (const { section, sub, key, value } of gitEntries(config)) {
-			// `alias.<name>`, or `[alias "<name>"] command = …`.
-			if (section === "alias" && ((sub === "" && key === name.toLowerCase()) || (sub.toLowerCase() === name.toLowerCase() && key === "command"))) found.push(value);
+			if (section !== "alias") continue;
+			if (sub === "") found.push({ name: key, value });
+			else if (key === "command") found.push({ name: sub.toLowerCase(), value });
 		}
 	}
 	return found;
