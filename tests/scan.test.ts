@@ -553,6 +553,12 @@ test("round 3: git config that runs commands, from -c, the repository, and inclu
 		for (const config of ['[filter "a\\"b"]\nclean = ./evil\n', '[core]\n[filter "a\\"b"] clean = ./evil\n', "[filter.x]\nclean = ./evil\n"]) {
 			assert.match(kinds((await findScripts("git status", folder({ ".git/config": config }), never)).unread).join("\n"), /\(filter clean\)/, config);
 		}
+		// CRLF files, and a continued line does not start a section.
+		const crlf = folder({ ".git/config": "[core]\r\n\thooksPath = myhooks\r\n[filter \"x\"]\r\n\tclean = ./evil\r\n" });
+		assert.match(kinds((await findScripts("git commit -m x", crlf, never)).unread).join("\n"), /from core\.hooksPath/);
+		assert.match(kinds((await findScripts("git status", crlf, never)).unread).join("\n"), /\(filter clean\)/);
+		const continued = folder({ ".git/config": "[core]\n\ta = x \\\n[x]\n\thooksPath = ./h2\n" });
+		assert.match(kinds((await findScripts("git commit -m x", continued, never)).unread).join("\n"), /from core\.hooksPath/);
 		const sameLine = folder({ ".git/config": "[alias] st = !./evil.sh\n[core] hooksPath = h\n" });
 		assert.match(kinds((await findScripts("git st", sameLine, never)).unread).join("\n"), /git alias "st"/);
 		assert.match(kinds((await findScripts("git commit -m x", sameLine, never)).unread).join("\n"), /from core\.hooksPath/);

@@ -1527,7 +1527,8 @@ function gitIncludes(config: string): string[] {
 function gitEntries(config: string): { section: string; key: string; value: string }[] {
 	const entries: { section: string; key: string; value: string }[] = [];
 	let section = "";
-	for (const line of config.split("\n")) {
+	// CRLF files read the same, and a line ending in an odd number of backslashes continues on the next.
+	for (const line of config.replace(/\r\n?/g, "\n").replace(/(?<!\\)((?:\\\\)*)\\\n/g, "$1").split("\n")) {
 		const header = /^\s*\[\s*([^\]\s"]+)(?:\s+"(?:[^"\\\n]|\\.)*")?\s*\]/.exec(line);
 		if (header) section = (header[1] ?? "").split(".")[0]?.toLowerCase() ?? "";
 		const entry = /^\s*([\w-]+)\s*=\s*(.*)$/.exec(header ? line.slice(header[0].length) : line);
