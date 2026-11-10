@@ -612,6 +612,14 @@ test("git config is read as git does, with no user config: CRLF, continued lines
 		const started = Date.now();
 		await findScripts("git ci", folder({ ".git/config": `[alias]\n\tci = ${words}\n` }), never);
 		assert.ok(Date.now() - started < 1000, `${Date.now() - started} ms`);
+		// Escapes mixed with quotes or backslashes do not hide a verb.
+		for (const config of ['[alias]\n\tci = -p\\t"com"mit\n', "[alias]\n\tci = -p\\tcom\\\\mit\n"]) {
+			assert.match(kinds((await findScripts("git ci -m x", hooked(config), never)).unread).join("\n"), /runs git hooks \(pre-commit\)/, config);
+		}
+		// `-n` is commit's --no-verify only when commit is the one verb the alias may reach.
+		const merge = folder({ ".git/config": "[alias]\n\tmg = merge\n\tci = commit\n", ".git/hooks/pre-merge-commit": "#!/bin/sh\n" });
+		assert.match(kinds((await findScripts("git mg -n --no-edit feat", merge, never)).unread).join("\n"), /runs git hooks \(pre-merge-commit\)/);
+		assert.deepEqual((await findScripts("git commit -n -m x", merge, never)).unread, []);
 		// A hook verb counts as a word, not inside another word such as `name`.
 		assert.deepEqual((await findScripts("git lg", hooked("[alias]\n\tlg = log --name-only --stat\n"), never)).unread, []);
 		const chain = Array.from({ length: 40 }, (_, i) => `\ta${i + 1} = a${i + 2}\n`).join("");

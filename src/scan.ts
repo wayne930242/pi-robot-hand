@@ -1217,8 +1217,6 @@ class Scanner {
 		for (const setting of configs === undefined ? [] : gitCommands(configs, NETWORK_VERBS.has(verb))) {
 			this.note("indirect", line, `runs a command git config sets (${setting}), which the check does not read`);
 		}
-		// Every value an alias may have, not the one git would pick, through chains of aliases, from `-c` and the
-		// config files: the scan reads the config two ways and does not unquote as git does, so any candidate counts.
 		// Which alias git would run, and through which others, is not worked out: git splits and unquotes values in ways
 		// the scan does not reproduce. When the command names an alias, every alias the config defines counts: any `!`
 		// in one is a shell command, and a hook verb anywhere in one may run hooks.
@@ -1226,17 +1224,27 @@ class Scanner {
 			.filter((setting) => /^alias\.[^=]+=/i.test(setting))
 			.map((setting) => ({ name: setting.slice(6, setting.indexOf("=")).replace(/\.command$/i, "").toLowerCase(), value: setting.slice(setting.indexOf("=") + 1) }));
 		const aliases = [...fromLine, ...(configs === undefined ? [] : gitAliases(configs))];
-		let effective = HOOK_VERBS.has(verb) ? verb : undefined;
+		// The hook verbs the command may run as: its own, or any an alias may reach.
+		const effective = new Set<string>(HOOK_VERBS.has(verb) ? [verb] : []);
 		if (aliases.some(({ name }) => name === verb.toLowerCase())) {
 			if (aliases.some(({ value }) => value.includes("!"))) {
 				this.note("indirect", line, `runs the git alias ${JSON.stringify(verb)}; the git config has aliases that run a shell command, which the check does not read`);
 				return;
 			}
-			// Two readings of each value: escapes as word breaks (`\t`, `\n`), and quotes and backslashes removed (`'com'mit`).
-			const readings = aliases.flatMap(({ value }) => [value.replace(/\\./g, " "), value.replace(/["'\\]/g, "")]);
-			effective ??= [...HOOK_VERBS].find((hook) => readings.some((reading) => new RegExp(`(^|[^a-z-])${hook}($|[^a-z-])`, "i").test(reading)));
+			// A hook verb is looked for in each value with every character but letters removed, so no mix of escapes and
+			// quotes hides it; `am`, too short for that, as a word in three readings (escapes as breaks, quotes and
+			// backslashes removed, and both).
+			const letters = aliases.map(({ value }) => value.toLowerCase().replace(/[^a-z]/g, ""));
+			const readings = aliases.flatMap(({ value }) => [
+				value.replace(/\\./g, " "),
+				value.replace(/["'\\]/g, ""),
+				value.replace(/\\(.)/g, (_all, char: string) => (/[ntb]/.test(char) ? " " : char)).replace(/["'\\]/g, ""),
+			]);
+			for (const hook of HOOK_VERBS) {
+				if (hook === "am" ? readings.some((reading) => AM_WORD.test(reading)) : letters.some((each) => each.includes(hook.replace(/-/g, "")))) effective.add(hook);
+			}
 		}
-		if (effective === undefined) return;
+		if (effective.size === 0) return;
 		if (settings.some((setting) => /^core\.hookspath=/i.test(setting))) {
 			this.note("indirect", line, "runs git hooks from a folder set on the command line, which the check does not read");
 			return;
@@ -1250,7 +1258,7 @@ class Scanner {
 			return;
 		}
 		// `--no-verify` skips only the hooks that could stop the command; the others still run.
-		const skipped = args.includes("--no-verify") || (effective === "commit" && args.includes("-n")) ? NO_VERIFY_HOOKS : new Set<string>();
+		const skipped = args.includes("--no-verify") || (effective.size === 1 && effective.has("commit") && args.includes("-n")) ? NO_VERIFY_HOOKS : new Set<string>();
 		const hooks = ((await gitHooks(dir)) ?? []).filter((hook) => !skipped.has(hook));
 		if (hooks.length > 0) this.note("indirect", line, `runs git hooks (${hooks.join(", ")}), which the check does not read`);
 	}
@@ -1578,6 +1586,8 @@ interface GitEntry {
 
 // `-c` settings that make git run a command.
 const COMMAND_SETTING = /^(credential\.(?:[^=]*\.)?helper=\s*!|core\.fsmonitor=(?!\s*(?:true|false|yes|no|on|off|0|1)?\s*$)|core\.sshcommand=|filter\.[^=]*\.(?:smudge|clean|process)=|diff\.[^=]*\.textconv=|merge\.[^=]*\.driver=)/i;
+// `am` as a git verb in an alias value: a word, with no letter or `-` beside it.
+const AM_WORD = /(^|[^a-z-])am($|[^a-z-])/i;
 // git commands that talk to a remote, which use credential helpers and the ssh command.
 const NETWORK_VERBS = new Set(["fetch", "pull", "push", "clone", "ls-remote", "remote", "submodule"]);
 
