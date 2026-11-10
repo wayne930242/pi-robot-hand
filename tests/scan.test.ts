@@ -553,6 +553,24 @@ test("round 3: git config that runs commands, from -c, the repository, and inclu
 		for (const config of ['[filter "a\\"b"]\nclean = ./evil\n', '[core]\n[filter "a\\"b"] clean = ./evil\n', "[filter.x]\nclean = ./evil\n"]) {
 			assert.match(kinds((await findScripts("git status", folder({ ".git/config": config }), never)).unread).join("\n"), /\(filter clean\)/, config);
 		}
+		assert.match(kinds((await findScripts("git commit -m x", dir, never)).unread).join("\n"), /from core\.hooksPath/);
+		assert.match(kinds((await findScripts("git -c core.sshCommand='./s' fetch", folder(), never)).unread).join("\n"), /sets git config on the command line that runs a command/);
+	} finally {
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+});
+
+test("git config is read as git does, with no user config: CRLF, continued lines, comments, lone CR, same-line entries", async () => {
+	const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+	const home = folder();
+	process.env.HOME = home;
+	process.env.XDG_CONFIG_HOME = join(home, ".config");
+	try {
+		// Without a hooks setting, a commit gets no note: the cases below are found by their own config.
+		assert.deepEqual((await findScripts("git commit -m x", folder({ ".git/config": "[core]\n\tbare = false\n" }), never)).unread, []);
 		// CRLF files, and a continued line does not start a section.
 		const crlf = folder({ ".git/config": "[core]\r\n\thooksPath = myhooks\r\n[filter \"x\"]\r\n\tclean = ./evil\r\n" });
 		assert.match(kinds((await findScripts("git commit -m x", crlf, never)).unread).join("\n"), /from core\.hooksPath/);
@@ -566,8 +584,6 @@ test("round 3: git config that runs commands, from -c, the repository, and inclu
 		const sameLine = folder({ ".git/config": "[alias] st = !./evil.sh\n[core] hooksPath = h\n" });
 		assert.match(kinds((await findScripts("git st", sameLine, never)).unread).join("\n"), /git alias "st"/);
 		assert.match(kinds((await findScripts("git commit -m x", sameLine, never)).unread).join("\n"), /from core\.hooksPath/);
-		assert.match(kinds((await findScripts("git commit -m x", dir, never)).unread).join("\n"), /from core\.hooksPath/);
-		assert.match(kinds((await findScripts("git -c core.sshCommand='./s' fetch", folder(), never)).unread).join("\n"), /sets git config on the command line that runs a command/);
 	} finally {
 		for (const [key, value] of Object.entries(saved)) {
 			if (value === undefined) delete process.env[key];
