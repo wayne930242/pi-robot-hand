@@ -99,7 +99,11 @@ const HOOK_VERBS = new Set(["commit", "push", "merge", "rebase", "pull", "checko
 const SECRET_FILES = [
 	/^\.env(\..*)?$/i,
 	/\.env$/i,
-	/^\.?(envrc|netrc|npmrc|yarnrc\.yml|pypirc|pgpass|git-credentials|htpasswd|my\.cnf|s3cfg|dockercfg)$/i,
+	/^\.?(envrc|netrc|npmrc|yarnrc\.yml|pypirc|pgpass|git-credentials|htpasswd|my\.cnf|s3cfg|dockercfg|kubeconfig|auth\.json)$/i,
+	// Shell startup files often export API keys.
+	/^\.?(bashrc|bash_profile|bash_login|bash_aliases|profile|zshrc|zshenv|zprofile|zlogin|kshrc|mkshrc)$/i,
+	/^config\.fish$/i,
+	/^(service[-_]?account|gcloud|application_default_credentials|client_secrets?).*\.json$/i,
 	/\.(pem|key|p12|pfx|jks|keystore|kdbx|ppk|ovpn|tfvars|tfstate|ini|cfg|conf|properties)$/i,
 	/^id_(rsa|dsa|ecdsa|ed25519)/i,
 ];
@@ -160,6 +164,12 @@ function inlineFlags(base: string): readonly string[] {
  */
 export const SCOPE_OPEN = Object.freeze([]) as unknown as string[];
 export const SCOPE_CLOSE = Object.freeze([]) as unknown as string[];
+/** Before a command that may not run, or runs in a child: after `||`, in a pipeline or in the background, or inside `if`, a loop, `case`, or `{ … }`. A `cd` there leaves the folder unknown. */
+export const UNSURE = Object.freeze([]) as unknown as string[];
+/** Substitutions nested past the limit were not parsed. */
+export const TOO_DEEP = Object.freeze([]) as unknown as string[];
+const BLOCK_OPENERS = new Set(["if", "while", "until", "for", "select", "case", "{"]);
+const BLOCK_CLOSERS = new Set(["fi", "done", "esac", "}"]);
 
 /**
  * Shell words of each simple command in `text`, in order. Quotes are removed; a command substitution
@@ -179,11 +189,17 @@ export function parseCommands(text: string, nest = 0): string[][] {
 	let quote: "'" | '"' | undefined;
 	let tag: false | "plain" | "strip" = false;
 	const heredocs: Heredoc[] = [];
-	// Inside `[[ … ]]`; inside a `case`, and whether a pattern comes next; open subshells.
+	// Inside `[[ … ]]`; inside a `case`, and whether a pattern comes next; open subshells; open compound commands.
 	let test = false;
 	let cases = 0;
 	let pattern = false;
 	let subshells = 0;
+	let blocks = 0;
+	// Whether the command's first word is a reserved word: only unquoted words are.
+	let keyword = false;
+	// The operator before the command being read, and whether that command is unsure.
+	let before = ";";
+	let unsure = false;
 	const atCommand = () => words.every((each) => KEYWORDS.has(each));
 	const pushWord = () => {
 		if (started) {
@@ -193,10 +209,15 @@ export function parseCommands(text: string, nest = 0): string[][] {
 				tag = false;
 				words.push("");
 			} else {
-				if (word === "[[" && atCommand()) test = true;
+				const reserved = !quoted && atCommand();
+				if (words.length === 0) keyword = !quoted;
+				if (reserved && BLOCK_OPENERS.has(word)) blocks++;
+				else if (reserved && BLOCK_CLOSERS.has(word)) blocks = Math.max(0, blocks - 1);
+				if (word === "[[" && reserved) test = true;
 				else if (word === "]]") test = false;
+				if (blocks > 0) unsure = true;
 				words.push(word);
-				if (word === "in" && words[0] === "case" && words.length >= 3) {
+				if (word === "in" && words[0] === "case" && keyword && words.length >= 3) {
 					out.push(words);
 					words = [];
 					cases++;
@@ -208,14 +229,23 @@ export function parseCommands(text: string, nest = 0): string[][] {
 		started = false;
 		quoted = false;
 	};
-	const flush = () => {
+	/** Ends the command; `after` is the operator that ends it. */
+	const flush = (after = ";") => {
 		pushWord();
-		if (words[0] === "esac") cases = Math.max(0, cases - 1);
-		if (words.length > 0) out.push(words);
+		if (words[0] === "esac" && keyword) cases = Math.max(0, cases - 1);
+		if (words.length > 0) {
+			// `||` may skip it; a pipeline or `&` runs it in a child; a compound command may skip or repeat it.
+			if (unsure || blocks > 0 || before === "||" || before === "|" || after === "|" || after === "&") out.push(UNSURE);
+			out.push(words);
+		}
 		words = [];
+		keyword = false;
+		unsure = false;
+		before = after;
 	};
 	const inner = (code: string, placeholder: string) => {
 		if (nest < MAX_NEST * 2) out.push(SCOPE_OPEN, ...parseCommands(code, nest + 1), SCOPE_CLOSE);
+		else out.push(TOO_DEEP);
 		word += placeholder;
 		started = true;
 	};
@@ -241,8 +271,9 @@ export function parseCommands(text: string, nest = 0): string[][] {
 		}
 		if (ch === "$" && text[i + 1] === "(") {
 			const end = closingParen(text, i + 2);
-			// `$(( … ))` is arithmetic; only the substitutions inside it run.
-			if (text[i + 2] === "(") {
+			// `$(( … ))` is arithmetic, when its inner `(` closes right before the outer: only the substitutions inside it
+			// run. Otherwise, as in `$((cmd) )`, it is a substitution holding a subshell.
+			if (text[i + 2] === "(" && text[closingParen(text, i + 3) + 1] === ")") {
 				within(text.slice(i + 3, end));
 				word += DYNAMIC;
 				started = true;
@@ -270,10 +301,10 @@ export function parseCommands(text: string, nest = 0): string[][] {
 			continue;
 		}
 		if (ch === "$" && text[i + 1] === "'") {
-			// `$'…'`: a backslash escapes the quote too.
+			// `$'…'`: a backslash escapes the quote too, and escapes such as `\x2e` stand for other characters.
 			let end = i + 2;
 			while (end < text.length && text[end] !== "'") end += text[end] === "\\" ? 2 : 1;
-			word += text.slice(i + 2, end);
+			word += ansiC(text.slice(i + 2, end));
 			started = true;
 			quoted = true;
 			i = end;
@@ -300,8 +331,8 @@ export function parseCommands(text: string, nest = 0): string[][] {
 			i = (newline < 0 ? text.length : newline) - 1;
 			continue;
 		}
-		if (ch === "(" && text[i + 1] === "(" && !started && atCommand()) {
-			// `(( … ))` is arithmetic; only the substitutions inside it run.
+		if (ch === "(" && text[i + 1] === "(" && !started && atCommand() && arithmetic(text, i + 2)) {
+			// `(( … ))` is arithmetic when it closes with `))`; only the substitutions inside it run. `((cmd) )` is two subshells.
 			const end = closingParen(text, i + 1);
 			within(text.slice(i + 2, end));
 			i = end;
@@ -342,7 +373,7 @@ export function parseCommands(text: string, nest = 0): string[][] {
 			continue;
 		}
 		if (ch === "\n") {
-			flush();
+			flush(";");
 			if (heredocs.length > 0) {
 				const { end, bodies } = readHeredocs(text, i + 1, heredocs);
 				heredocs.forEach((doc, n) => {
@@ -357,20 +388,20 @@ export function parseCommands(text: string, nest = 0): string[][] {
 			continue;
 		}
 		if (ch === ";" && cases > 0 && (text[i + 1] === ";" || text[i + 1] === "&")) {
-			flush();
+			flush(";");
 			i++;
 			if (text[i + 1] === "&") i++;
 			pattern = true;
 			continue;
 		}
 		if (ch === "(") {
-			flush();
+			flush(";");
 			out.push(SCOPE_OPEN);
 			subshells++;
 			continue;
 		}
 		if (ch === ")") {
-			flush();
+			flush(";");
 			if (subshells > 0) {
 				out.push(SCOPE_CLOSE);
 				subshells--;
@@ -378,7 +409,10 @@ export function parseCommands(text: string, nest = 0): string[][] {
 			continue;
 		}
 		if (";|&".includes(ch)) {
-			flush();
+			let op = ch;
+			if ((ch === "&" || ch === "|") && text[i + 1] === ch) op += text[++i];
+			else if (ch === "|" && text[i + 1] === "&") i++;
+			flush(op);
 			continue;
 		}
 		if (ch === " " || ch === "\t" || ch === "\r") {
@@ -405,13 +439,13 @@ interface Heredoc {
 /** The commands of every command substitution in `text`, which is not itself a command (arithmetic, `${…}`, a here-document). */
 function substitutions(text: string, nest: number): string[][] {
 	const out: string[][] = [];
-	if (nest >= MAX_NEST * 2) return out;
+	if (nest >= MAX_NEST * 2) return /\$\(|`/.test(text) ? [TOO_DEEP] : out;
 	for (let i = 0; i < text.length; i++) {
 		const ch = text[i];
 		if (ch === "\\") i++;
 		else if (ch === "$" && text[i + 1] === "(") {
 			const end = closingParen(text, i + 2);
-			if (text[i + 2] === "(") out.push(...substitutions(text.slice(i + 3, end), nest + 1));
+			if (text[i + 2] === "(" && text[closingParen(text, i + 3) + 1] === ")") out.push(...substitutions(text.slice(i + 3, end), nest + 1));
 			else out.push(SCOPE_OPEN, ...parseCommands(text.slice(i + 2, end), nest + 1), SCOPE_CLOSE);
 			i = end;
 		} else if (ch === "`") {
@@ -423,10 +457,17 @@ function substitutions(text: string, nest: number): string[][] {
 	return out;
 }
 
-/** The index of the `)` that closes a `(` opened just before `start`, or the text's length. */
+/**
+ * The index of the `)` that closes a `(` opened just before `start`, or the text's length. Parentheses in quotes,
+ * comments, here-documents, and between `case` and `esac` (where a pattern's `)` closes nothing) do not count.
+ */
 function closingParen(text: string, start: number): number {
 	let depth = 1;
 	let quote: "'" | '"' | undefined;
+	let cases = 0;
+	const tags: { tag: string; strip: boolean }[] = [];
+	const boundary = (at: number) => at < start || /[\s;|&()]/.test(text[at] ?? " ");
+	const reserved = (at: number, name: string) => text.startsWith(name, at) && boundary(at - 1) && /[\s;|&()]|^$/.test(text[at + name.length] ?? "");
 	for (let i = start; i < text.length; i++) {
 		const ch = text[i];
 		if (quote) {
@@ -434,10 +475,50 @@ function closingParen(text: string, start: number): number {
 			else if (ch === quote) quote = undefined;
 		} else if (ch === "\\") i++;
 		else if (ch === "'" || ch === '"') quote = ch;
+		else if (ch === "#" && boundary(i - 1)) {
+			const newline = text.indexOf("\n", i);
+			i = (newline < 0 ? text.length : newline) - 1;
+		} else if (ch === "<" && text[i + 1] === "<" && text[i + 2] !== "<") {
+			const match = /^<<(-?)[ \t]*(['"]?)([^\s'";|&<>()]+)\2/.exec(text.slice(i));
+			if (match?.[3]) {
+				tags.push({ tag: match[3], strip: match[1] === "-" });
+				i += match[0].length - 1;
+			}
+		} else if (ch === "\n" && tags.length > 0) {
+			i = readHeredocs(text, i + 1, tags.map(({ tag, strip }) => ({ tag, strip, quoted: true, words: [], index: 0 }))).end - 1;
+			tags.length = 0;
+		} else if (reserved(i, "case")) {
+			cases++;
+			i += 3;
+		} else if (cases > 0 && reserved(i, "esac")) {
+			cases--;
+			i += 3;
+		} else if (cases > 0) continue;
 		else if (ch === "(") depth++;
 		else if (ch === ")" && --depth === 0) return i;
 	}
 	return text.length;
+}
+
+/**
+ * Whether `((` (with `start` after it) is arithmetic: its inner `(` closes right before the outer. One that never
+ * closes is a syntax error; it counts as arithmetic, so the rest of the text is not scanned again for each `(`.
+ */
+function arithmetic(text: string, start: number): boolean {
+	const end = closingParen(text, start);
+	return end >= text.length || text[end + 1] === ")";
+}
+
+/** The characters an ANSI-C quoted string `$'…'` stands for. */
+function ansiC(body: string): string {
+	const simple: Record<string, string> = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+	return body.replace(/\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[0-7]{1,3}|c.|.)/g, (all, escape: string) => {
+		const head = escape[0] ?? "";
+		if (head === "x" || head === "u" || head === "U") return String.fromCodePoint(Math.min(Number.parseInt(escape.slice(1), 16), 0x10ffff));
+		if (/[0-7]/.test(head)) return String.fromCodePoint(Number.parseInt(escape, 8));
+		if (head === "c") return String.fromCodePoint((escape.codePointAt(1) ?? 64) & 0x1f);
+		return simple[head] ?? all;
+	});
 }
 
 /** The index of the `}` that closes a `${` opened just before `start`, or the text's length. */
@@ -535,6 +616,8 @@ class Scanner {
 	private omitted = 0;
 	// `named`: seen as a plain argument and not read, so a later command that runs it reads it; `done`: read or reported.
 	private readonly files = new Map<string, "named" | "done">();
+	// The text of each file read, as read, for a later `source` of the same file.
+	private readonly texts = new Map<string, string>();
 	private readonly reported = new Set<string>();
 	private readonly queue: { text: string; where: Where }[] = [];
 	private readonly top: string;
@@ -544,7 +627,8 @@ class Scanner {
 	constructor(cwd: string, isSecret: (canonical: string) => boolean, redact: Redact) {
 		this.top = resolve(cwd);
 		this.isSecret = isSecret;
-		this.redact = redact;
+		// Everything the scan sends or shows passes here: secret_drop's values, then anything else that looks like one.
+		this.redact = (text) => maskSecrets(redact(text));
 	}
 
 	async run(command: string): Promise<ScriptScan> {
@@ -573,21 +657,29 @@ class Scanner {
 		return path === home || path.startsWith(`${home}${sep}`) ? `~${path.slice(home.length)}` : path;
 	}
 
-	private async text(text: string, where: Where, nest: number): Promise<void> {
-		const at = { ...where };
+	/** Scans shell text. `inPlace` (for `eval`) lets a `cd` in it change `where`, as in the shell that runs it. */
+	private async text(text: string, where: Where, nest: number, inPlace = false): Promise<void> {
+		const at = inPlace ? where : { ...where };
 		// A `cd` inside a subshell or substitution ends with it.
 		const outer: (string | undefined)[] = [];
+		let unsure = false;
 		for (const words of parseCommands(text)) {
 			if (words === SCOPE_OPEN) outer.push(at.cwd);
 			else if (words === SCOPE_CLOSE) {
 				if (outer.length > 0) at.cwd = outer.pop();
-			} else await this.command(words, at, nest);
+			} else if (words === UNSURE) unsure = true;
+			else if (words === TOO_DEEP) this.note("skipped", text, `has command substitutions nested more than ${MAX_NEST * 2} levels deep`, "\0deep");
+			else {
+				await this.command(words, at, nest, unsure);
+				unsure = false;
+			}
 		}
 	}
 
-	private async command(all: string[], where: Where, nest: number): Promise<void> {
-		const { name, args, input, inline, xargs, project, generic } = splitCommand(all);
+	private async command(all: string[], where: Where, nest: number, unsure = false): Promise<void> {
+		const { name, args, assigns, input, inline, xargs, project, generic } = splitCommand(all);
 		const line = all.join(" ");
+		for (const assign of assigns) await this.preload(assign, line, where);
 		if (name === undefined) {
 			await this.generic(generic, where);
 			return;
@@ -595,13 +687,13 @@ class Scanner {
 		const base = basename(name);
 		if (name === "cd" || name === "pushd" || name === "popd") {
 			const target = args.find((arg) => !arg.startsWith("-"));
-			// `popd` and a bare `pushd` return to a folder the scan does not track.
-			where.cwd = name === "popd" || (name === "pushd" && target === undefined) ? undefined : changeDir(where.cwd, target);
+			// A `cd` that may not run, or runs in a child, leaves the folder unknown; so do `popd` and a bare `pushd`.
+			where.cwd = unsure || name === "popd" || (name === "pushd" && target === undefined) ? undefined : changeDir(where.cwd, target);
 			return;
 		}
 		if (isDynamic(name)) {
-			// In a makefile, `$(CC)` is make's own; a path built from a variable is not.
-			if (where.mode === "shell" || name.includes("/")) this.note("indirect", line, `runs a command whose name is set at runtime (${name})`, name);
+			// In a makefile, `$(CC)` names a tool on PATH; any other variable or a path built from one is set at runtime.
+			if (where.mode === "shell" || !MAKE_TOOLS.test(name)) this.note("indirect", line, `runs a command whose name is set at runtime (${name})`, name);
 		} else if (SHELLS.has(name) || SHELLS.has(base)) {
 			await this.shell(name, args, input, inline, xargs, line, where, nest);
 		} else if (INTERPRETER.test(base) || base === "bun") {
@@ -620,7 +712,7 @@ class Scanner {
 			const verb = args.find((arg) => !arg.startsWith("-"));
 			if (verbs === undefined || (verb !== undefined && verbs.includes(verb))) this.note("indirect", line, "runs code from the project, or from packages it builds or installs, which the check does not read");
 		} else if (base === "git") {
-			await this.git(args, line, where);
+			await this.git(args, assigns, line, where);
 		} else if (base === "find") {
 			// `-exec cmd {} ;` and the like run a command for each file found.
 			for (let i = 0; i < args.length; i++) {
@@ -630,15 +722,18 @@ class Scanner {
 				i = end < 0 ? args.length : end;
 			}
 		} else if (base === "eval") {
-			await this.code(args.join(" "), "eval", line, where, nest);
+			await this.code(args.join(" "), "eval", line, where, nest, true);
 		} else if (name.includes("/") || (project && SCRIPT_EXTENSIONS.has(extname(name).toLowerCase()))) {
 			await this.runs(name, line, where, false);
 		}
 		await this.generic(generic, where);
 	}
 
-	/** A string run as shell code (`sh -c`, `eval`, a here-document): scanned like the command, or reported when built at runtime. */
-	private async code(code: string | undefined, how: string, line: string, where: Where, nest: number): Promise<void> {
+	/**
+	 * A string run as shell code (`sh -c`, `eval`, a here-document): scanned like the command, or reported when built
+	 * at runtime. `inPlace`: it runs in the current shell (`eval`), so its `cd` counts.
+	 */
+	private async code(code: string | undefined, how: string, line: string, where: Where, nest: number, inPlace = false): Promise<void> {
 		if (code === undefined || onlyDynamic(code)) {
 			if (where.mode === "shell" || code === undefined) this.note("indirect", line, `${how} runs code built at runtime`);
 			return;
@@ -647,7 +742,29 @@ class Scanner {
 			this.note("skipped", line, `shell code nested more than ${MAX_NEST} levels deep`);
 			return;
 		}
-		await this.text(code, { ...where }, nest + 1);
+		await this.text(code, where, nest + 1, inPlace);
+	}
+
+	/** An environment assignment that makes a program run a file first: `BASH_ENV`, `ENV`, `NODE_OPTIONS`, and the like. */
+	private async preload(assign: string, line: string, where: Where): Promise<void> {
+		const at = assign.indexOf("=");
+		const key = assign.slice(0, at).replace(/\+$/, "");
+		const value = assign.slice(at + 1);
+		if (!value) return;
+		if (key === "BASH_ENV" || key === "ENV" || key === "PYTHONSTARTUP") await this.runs(value, line, where, key !== "PYTHONSTARTUP");
+		else if (key === "NODE_OPTIONS") {
+			const words = value.split(/\s+/).filter(Boolean);
+			for (let i = 0; i < words.length; i++) {
+				const [option = "", attached] = splitOption(words[i] ?? "");
+				if (NODE_PRELOADS.has(option)) await this.preloadFile(attached ?? words[++i], line, where);
+			}
+		} else if (key === "PERL5OPT" || key === "RUBYOPT") this.note("indirect", line, `${key} may load code the check does not read`);
+	}
+
+	/** A file an interpreter loads before the program (`--require ./x.js`); a package name is judged by its name. */
+	private async preloadFile(value: string | undefined, line: string, where: Where): Promise<void> {
+		if (value === undefined) return;
+		if (isDynamic(value) || /^[./~]/.test(value) || SCRIPT_EXTENSIONS.has(extname(value).toLowerCase())) await this.runs(value, line, where, false);
 	}
 
 	private async shell(name: string, args: string[], input: string | undefined, inline: string | undefined, xargs: boolean, line: string, where: Where, nest: number): Promise<void> {
@@ -661,7 +778,9 @@ class Scanner {
 			if (SHELL_VALUE_OPTIONS.has(arg)) i++;
 			else if (NO_CODE.has(arg)) return;
 			else if (!arg.startsWith("-") && !arg.startsWith("+")) {
-				await this.runs(arg, line, where, true);
+				const text = await this.runs(arg, line, where, true);
+				// `source` runs the file in this shell: a `cd` in it, or a file the scan could not read, leaves the folder unknown.
+				if ((name === "source" || name === ".") && (text === undefined || CHANGES_DIR.test(text))) where.cwd = undefined;
 				return;
 			}
 		}
@@ -680,6 +799,22 @@ class Scanner {
 		const values = INTERPRETER_VALUE_OPTIONS[base] ?? [];
 		for (let i = 0; i < args.length; i++) {
 			const arg = args[i] ?? "";
+			const [option = "", attached] = splitOption(arg);
+			// Files loaded before the program: `--require=./x.js`, `-r ./x.js`, `ruby -r./x.rb`.
+			if (NODE_PRELOADS.has(option) && base !== "ruby" && base !== "perl" && !/^(python|pypy)/.test(base)) {
+				await this.preloadFile(attached ?? args[++i], line, where);
+				continue;
+			}
+			if (base === "ruby" && arg.startsWith("-r")) {
+				await this.preloadFile(arg.length > 2 ? arg.slice(2) : args[++i], line, where);
+				continue;
+			}
+			if (base === "php" && arg === "-d") {
+				const setting = /^auto_(?:prepend|append)_file=(.+)$/.exec(args[++i] ?? "");
+				if (setting?.[1]) await this.runs(setting[1], line, where, false);
+				continue;
+			}
+			if (attached !== undefined && option.startsWith("--")) continue;
 			if (inlineFlags(base).includes(arg) || NO_CODE.has(arg)) return;
 			if (arg === "--test") {
 				this.note("indirect", line, "runs the test files it finds, which the check does not read");
@@ -730,27 +865,27 @@ class Scanner {
 		else this.note("indirect", line, where.downloads ? "runs code from standard input, which may be what the command downloads" : "runs code from standard input, which the check does not see");
 	}
 
-	/** A file the command runs: read it, or report why not. */
-	private async runs(word: string, line: string, where: Where, shell: boolean): Promise<void> {
+	/** A file the command runs: read it, or report why not. Returns its text when the scan has it, sent or not. */
+	private async runs(word: string, line: string, where: Where, shell: boolean): Promise<string | undefined> {
 		if (word.includes(PROCESS)) {
 			this.note("indirect", line, "runs the output of another command as code");
-			return;
+			return undefined;
 		}
 		if (isDynamic(word)) {
-			if (where.mode === "shell" || word.includes("/")) this.note("indirect", short(word), "runs a path set at runtime");
-			return;
+			if (where.mode === "shell" || !MAKE_TOOLS.test(word)) this.note("indirect", short(word), "runs a path set at runtime");
+			return undefined;
 		}
 		if (/[*?[]/.test(word)) {
 			this.note("indirect", word, "runs the files that match this pattern, which the check does not read");
-			return;
+			return undefined;
 		}
 		const path = await locate(word, where);
 		if (path === undefined) {
 			if (where.cwd === undefined && !isAbsolute(expandHome(word))) this.note("indirect", word, "is relative to a folder set at runtime");
 			else this.note("missing", word, "does not exist");
-			return;
+			return undefined;
 		}
-		await this.read(path, { shown: word, runs: true, shell, cwd: where.cwd, depth: where.depth + 1 });
+		return this.read(path, { shown: word, runs: true, shell, cwd: where.cwd, depth: where.depth + 1 });
 	}
 
 	/** Words that name an existing script file, wherever they stand: read them, but never report a missing one. */
@@ -763,17 +898,33 @@ class Scanner {
 		}
 	}
 
-	private async read(path: string, how: Read): Promise<void> {
+	/**
+	 * Reads a file the command names or runs, sends it when it is a script, and returns its text (as read, not
+	 * redacted) for the scan's own use. A file that may hold secrets is read only here, never sent: the scan still
+	 * reports a `cd` or commands in it. A file secret_drop protects is never read.
+	 */
+	private async read(path: string, how: Read): Promise<string | undefined> {
 		const canonical = canonicalPath(path, "/");
 		const seen = this.files.get(canonical);
-		if (seen === "done" || (seen === "named" && !how.runs)) return;
+		if (seen === "done" || (seen === "named" && !how.runs)) return this.texts.get(canonical);
 		const named = () => void this.files.set(canonical, "named");
 		this.files.set(canonical, "done");
-		const withheld = this.isSecret(canonical) ? "secret_drop protects it, so it is never sent" : secretLike(canonical) ? "may hold secrets, so it is not sent" : undefined;
-		if (withheld) {
-			if (how.runs) this.note("missing", how.shown, withheld);
+		if (this.isSecret(canonical)) {
+			if (how.runs) this.note("missing", how.shown, "secret_drop protects it, so it is never sent");
 			else named();
-			return;
+			return undefined;
+		}
+		if (secretLike(canonical)) {
+			if (!how.runs) {
+				named();
+				return undefined;
+			}
+			this.note("missing", how.shown, "may hold secrets, so it is not sent");
+			const kept = await readText(canonical, MAX_SCRIPT_BYTES);
+			if (kept.kind !== "text") return undefined;
+			if (!how.make && !onlyAssignments(kept.head)) this.note("indirect", how.shown, "runs commands from a file that may hold secrets, which the check does not see");
+			this.texts.set(canonical, kept.head);
+			return kept.head;
 		}
 		const ext = extname(canonical).toLowerCase();
 		const byName = how.runs || how.make || how.shell || SCRIPT_EXTENSIONS.has(ext) || MAKEFILES.includes(basename(canonical));
@@ -785,41 +936,46 @@ class Scanner {
 			else if (file.kind === "other") this.note("missing", how.shown, "is not a regular file");
 			// A compiled program on the system is judged by its name, like any command on PATH.
 			else if (!isAbsolute(expandHome(how.shown))) this.note("missing", how.shown, "is a binary file, not text");
-			return;
+			return undefined;
 		}
 		if (!byName && !file.head.startsWith("#!")) {
 			named();
-			return;
+			return undefined;
 		}
 		// A script a nested script merely names is read when there is room, and left out silently when not.
 		const report = how.runs || how.depth === 1;
 		if (how.depth > MAX_DEPTH) {
 			if (report) this.note("skipped", how.shown, `is nested more than ${MAX_DEPTH} levels deep`);
-			return;
+			return undefined;
 		}
 		if (this.scripts.length >= MAX_SCRIPTS) {
 			if (report) this.note("skipped", how.shown, `is past the ${MAX_SCRIPTS}-file limit`);
-			return;
+			return undefined;
 		}
 		if (!byName) file = await readText(canonical, MAX_SCRIPT_BYTES + REDACT_MARGIN);
-		if (file.kind !== "text") return;
+		if (file.kind !== "text") return undefined;
 		// Redact the whole read first, then cut in bytes, so the cut never splits a secret the margin holds whole.
 		const redacted = this.redact(file.head);
 		const text = cutBytes(redacted, MAX_SCRIPT_BYTES);
 		const truncated = file.size > MAX_SCRIPT_BYTES || text.length < redacted.length;
 		this.scripts.push({ path: canonical, text, truncated });
 		if (truncated) this.note("truncated", how.shown, `only the first ${size(MAX_SCRIPT_BYTES)} of ${size(Math.max(file.size, Buffer.byteLength(redacted)))} were read`);
-		const where: Where = { cwd: how.cwd, dir: dirname(canonical), depth: how.depth, mode: "shell", downloads: DOWNLOADERS.test(text) };
+		// The scan parses the text as read (the part that was sent), so masking a value cannot hide a command.
+		const raw = cutBytes(file.head, MAX_SCRIPT_BYTES);
+		this.texts.set(canonical, raw);
+		const where: Where = { cwd: how.cwd, dir: dirname(canonical), depth: how.depth, mode: "shell", downloads: DOWNLOADERS.test(raw) };
 		if (how.make || MAKEFILES.includes(basename(canonical))) {
-			const make = makefile(text);
+			const make = makefile(raw);
+			if (make.functions) this.note("indirect", how.shown, "uses make functions (define, call, eval) the check does not expand");
 			for (const include of make.includes) {
 				if (include.includes("$") || /[*?[]/.test(include)) this.note("indirect", include, "is a makefile included from a path set at runtime");
 				else await this.read(resolve(how.cwd ?? dirname(canonical), expandHome(include)), { shown: include, runs: true, make: true, cwd: how.cwd, depth: how.depth });
 			}
 			this.queue.push({ text: make.shell, where: { ...where, mode: "make" } });
-		} else if (how.shell || isShellScript(canonical, text)) {
-			this.queue.push({ text, where });
+		} else if (how.shell || isShellScript(canonical, raw)) {
+			this.queue.push({ text: raw, where });
 		}
+		return raw;
 	}
 
 	private async make(args: string[], line: string, where: Where): Promise<void> {
@@ -963,23 +1119,51 @@ class Scanner {
 		return true;
 	}
 
-	/** git commands that run hooks: reported when the repository has hooks, which the check does not read. */
-	private async git(args: string[], line: string, where: Where): Promise<void> {
+	/**
+	 * git commands that run hooks, and aliases that run a shell command: reported when the repository or the user's
+	 * git config sets them up. Config files are matched here and never sent: they can hold credentials in URLs.
+	 */
+	private async git(args: string[], assigns: string[], line: string, where: Where): Promise<void> {
 		let dir = where.cwd;
 		let verb: string | undefined;
+		const settings: string[] = [];
 		for (let i = 0; i < args.length && verb === undefined; i++) {
 			const arg = args[i] ?? "";
 			if (arg === "-C") dir = changeDir(dir, args[++i]);
-			else if (arg === "-c" || arg === "--git-dir" || arg === "--work-tree" || arg === "--namespace") i++;
+			else if (arg === "-c") settings.push(args[++i] ?? "");
+			else if (arg === "--git-dir" || arg === "--work-tree" || arg === "--namespace" || arg === "--exec-path") {
+				if (arg === "--git-dir" || arg === "--exec-path") dir = undefined;
+				i++;
+			} else if (arg.startsWith("--git-dir=") || arg.startsWith("--exec-path=")) dir = undefined;
 			else if (!arg.startsWith("-")) verb = arg;
 		}
-		if (verb === undefined || !HOOK_VERBS.has(verb) || args.includes("--no-verify")) return;
-		if (dir === undefined) {
+		if (assigns.some((assign) => /^(GIT_DIR|GIT_COMMON_DIR|GIT_CONFIG\w*|GIT_EXEC_PATH)=/.test(assign))) dir = undefined;
+		if (verb === undefined) return;
+		if (settings.some((setting) => /^alias\./i.test(setting) && setting.includes("!"))) this.note("indirect", line, "runs a git alias that runs a shell command");
+		const configs = await gitConfigs(dir);
+		const alias = configs === undefined ? undefined : gitAlias(configs, verb);
+		if (alias?.startsWith("!")) {
+			this.note("indirect", line, `runs the git alias ${JSON.stringify(verb)}, which runs a shell command the check does not read`);
+			return;
+		}
+		const effective = alias?.split(/\s+/)[0] ?? verb;
+		if (!HOOK_VERBS.has(effective)) return;
+		if (settings.some((setting) => /^core\.hookspath=/i.test(setting))) {
+			this.note("indirect", line, "runs git hooks from a folder set on the command line, which the check does not read");
+			return;
+		}
+		if (dir === undefined || configs === undefined) {
 			this.note("indirect", line, "may run git hooks of a repository set at runtime, which the check does not read");
 			return;
 		}
-		const hooks = await gitHooks(dir);
-		if (hooks) this.note("indirect", line, `runs git hooks (${hooks}), which the check does not read`);
+		if (configs.some((config) => /^\s*hookspath\s*=/im.test(config))) {
+			this.note("indirect", line, "runs git hooks (from core.hooksPath), which the check does not read");
+			return;
+		}
+		// `--no-verify` skips only the hooks that could stop the command; the others still run.
+		const skipped = args.includes("--no-verify") || (effective === "commit" && args.includes("-n")) ? NO_VERIFY_HOOKS : new Set<string>();
+		const hooks = ((await gitHooks(dir)) ?? []).filter((hook) => !skipped.has(hook));
+		if (hooks.length > 0) this.note("indirect", line, `runs git hooks (${hooks.join(", ")}), which the check does not read`);
 	}
 }
 
@@ -988,6 +1172,8 @@ interface Command {
 	name?: string;
 	/** Its arguments, redirections removed. */
 	args: string[];
+	/** Environment assignments for the command, before it or after `env`. */
+	assigns: string[];
 	/** The file standard input comes from (`< file`). */
 	input?: string;
 	/** The text of a here-document or here-string fed to standard input. */
@@ -1016,10 +1202,12 @@ function splitCommand(all: readonly string[]): Command {
 	let i = 0;
 	let xargs = false;
 	let project = false;
+	const assigns: string[] = [];
 	while (i < words.length) {
 		const word = words[i] ?? "";
 		const base = basename(word);
 		if (ASSIGNMENT.test(word) || KEYWORDS.has(word)) {
+			if (ASSIGNMENT.test(word)) assigns.push(word);
 			i++;
 			continue;
 		}
@@ -1028,7 +1216,7 @@ function splitCommand(all: readonly string[]): Command {
 			i += 2;
 			continue;
 		}
-		if (LOOPS.has(word) || CLOSERS.has(word)) return { args: [], inline, xargs, project, generic };
+		if (LOOPS.has(word) || CLOSERS.has(word)) return { args: [], assigns, inline, xargs, project, generic };
 		const values = WRAPPERS[base];
 		if (values && Object.hasOwn(WRAPPERS, base)) {
 			if (base === "xargs") xargs = true;
@@ -1036,7 +1224,10 @@ function splitCommand(all: readonly string[]): Command {
 			while (i < words.length) {
 				const option = words[i] ?? "";
 				if (values.has(option)) i += 2;
-				else if (option.startsWith("-") || (base === "env" && ASSIGNMENT.test(option))) i++;
+				else if (base === "env" && ASSIGNMENT.test(option)) {
+					assigns.push(option);
+					i++;
+				} else if (option.startsWith("-")) i++;
 				else break;
 			}
 			// `timeout 5 cmd`, `nice 10 cmd`: a bare number is the wrapper's own value.
@@ -1052,7 +1243,7 @@ function splitCommand(all: readonly string[]): Command {
 		}
 		break;
 	}
-	return { name: words[i], args: words.slice(i + 1), input, inline, xargs, project, generic };
+	return { name: words[i], args: words.slice(i + 1), assigns, input, inline, xargs, project, generic };
 }
 
 function changeDir(cwd: string | undefined, target: string | undefined): string | undefined {
@@ -1061,11 +1252,47 @@ function changeDir(cwd: string | undefined, target: string | undefined): string 
 	return resolve(cwd, expandHome(target));
 }
 
+// Options that load a file before the program: node, bun, deno, tsx.
+const NODE_PRELOADS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "--preload"]);
+// A `cd`, `pushd`, or `popd` anywhere in a text.
+const CHANGES_DIR = /(^|[\s;&|(`{])(cd|pushd|popd)(\s|;|$)/m;
+
+/** `--name=value` as its name and value; any other word as itself. */
+function splitOption(word: string): [string, string | undefined] {
+	const at = word.indexOf("=");
+	return word.startsWith("--") && at > 0 ? [word.slice(0, at), word.slice(at + 1)] : [word, undefined];
+}
+
+/** Whether a text holds only comments and literal assignments, as an env file does: nothing that runs. */
+function onlyAssignments(text: string): boolean {
+	return text.split("\n").every((line) => /^\s*(#.*)?$/.test(line) || /^\s*(export\s+)?[A-Za-z_][A-Za-z0-9_]*=('[^']*'|"[^"$`\\]*"|[^\s'"$`;&|()<>\\]*)\s*(#.*)?$/.test(line));
+}
+
 /** A name that commonly holds credentials, such as an env file, a key, or a config file. */
 function secretLike(path: string): boolean {
 	const name = basename(path);
 	if (SECRET_FILES.some((pattern) => pattern.test(name))) return true;
-	return !SCRIPT_EXTENSIONS.has(extname(name).toLowerCase()) && /secret|credential|passw|token/i.test(name);
+	// Whatever its extension: `secrets.sh` and `token.py` are as likely to hold one as `secrets.txt`.
+	return /(^|[._-])(secrets?|credentials?|creds|passw(or)?ds?|passwd|tokens?|api[_-]?keys?)([._-]|$)/i.test(name);
+}
+
+// A name whose value is a credential, in `NAME=value`, `NAME: value`, or `"name": "value"`, and its literal value.
+const SECRET_ASSIGNMENT = /(["']?\b[\w.-]*(?:secret|token|passw(?:or)?d|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)[\w.-]*["']?[ \t]*[:=][ \t]*)("[^"$`\n]*"|'[^'\n]*'|[^\s"'$`;&|()#,}]+)/gi;
+// Credential formats that are recognizable on their own, and passwords in URLs.
+const SECRET_VALUES = /\b(sk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|glpat-[\w-]{20,}|xox[abprs]-[\w-]{10,}|AKIA[0-9A-Z]{16}|AIza[\w-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$))/g;
+const URL_PASSWORD = /(\b[a-z][\w+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi;
+
+/**
+ * Text with values that look like credentials replaced by `[REDACTED]`: literal values of names such as `API_KEY`
+ * or `password`, known token formats, private keys, and passwords in URLs. secret_drop redacts only the values it
+ * knows; this covers files that hold one it never saw. A value built at runtime (`$(…)`, `$VAR`) is kept, so what
+ * the command runs stays visible.
+ */
+export function maskSecrets(text: string): string {
+	return text
+		.replace(SECRET_ASSIGNMENT, (_all, name: string, value: string) => `${name}${value.startsWith('"') ? '"[REDACTED]"' : value.startsWith("'") ? "'[REDACTED]'" : "[REDACTED]"}`)
+		.replace(SECRET_VALUES, "[REDACTED]")
+		.replace(URL_PASSWORD, "$1[REDACTED]@");
 }
 
 /** The first `bytes` bytes of `text`, without a character cut in half. */
@@ -1142,29 +1369,65 @@ async function findMakefile(dir: string): Promise<string | undefined> {
 	return found === undefined ? undefined : realpath(found).catch(() => found);
 }
 
-/** The hooks git would run in the repository holding `dir`, named, or undefined when there are none. */
-async function gitHooks(dir: string): Promise<string | undefined> {
+const NO_VERIFY_HOOKS = new Set(["pre-commit", "commit-msg", "pre-merge-commit", "pre-push", "pre-rebase", "pre-applypatch", "applypatch-msg"]);
+
+/** The git folder (shared by worktrees) of the repository holding `dir`, or undefined outside one. */
+async function gitDir(dir: string): Promise<string | undefined> {
 	for (let at = dir; ; at = dirname(at)) {
 		const dotGit = join(at, ".git");
 		const info = await stat(dotGit).catch(() => undefined);
 		if (info) {
-			let gitDir = dotGit;
+			let found = dotGit;
 			if (info.isFile()) {
 				const pointer = await readText(dotGit, 4_096);
 				const target = pointer.kind === "text" ? /^gitdir:\s*(.+)$/m.exec(pointer.head)?.[1] : undefined;
 				if (!target) return undefined;
-				gitDir = resolve(at, target.trim());
+				found = resolve(at, target.trim());
 			}
-			const common = await readText(join(gitDir, "commondir"), 4_096);
-			const commonDir = common.kind === "text" ? resolve(gitDir, common.head.trim()) : gitDir;
-			// Only matched here, never sent: the config can hold credentials in remote URLs.
-			const config = await readText(join(commonDir, "config"), 64_000);
-			if (config.kind === "text" && /^\s*hookspath\s*=/im.test(config.head)) return "from core.hooksPath";
-			const hooks = (await readdir(join(commonDir, "hooks")).catch(() => [] as string[])).filter((name) => !name.endsWith(".sample")).sort();
-			return hooks.length > 0 ? hooks.join(", ") : undefined;
+			const common = await readText(join(found, "commondir"), 4_096);
+			return common.kind === "text" ? resolve(found, common.head.trim()) : found;
 		}
 		if (dirname(at) === at) return undefined;
 	}
+}
+
+/**
+ * The texts of the git config files that apply in `dir` (system, user, repository, worktree), for matching only;
+ * undefined when `dir` is unknown. A file another one includes is not followed.
+ */
+async function gitConfigs(dir: string | undefined): Promise<string[] | undefined> {
+	if (dir === undefined) return undefined;
+	const repo = await gitDir(dir);
+	const xdg = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+	const paths = ["/etc/gitconfig", join(homedir(), ".gitconfig"), join(xdg, "git", "config"), ...(repo ? [join(repo, "config"), join(repo, "config.worktree")] : [])];
+	const texts: string[] = [];
+	for (const path of paths) {
+		const file = await readText(path, 64_000);
+		if (file.kind === "text") texts.push(file.head);
+	}
+	return texts;
+}
+
+/** The value of `alias.<name>` in git config texts, the last one winning, or undefined. */
+function gitAlias(configs: readonly string[], name: string): string | undefined {
+	let found: string | undefined;
+	for (const config of configs) {
+		let inAlias = false;
+		for (const line of config.split("\n")) {
+			const section = /^\s*\[\s*([^\]\s"]+)/.exec(line);
+			if (section) inAlias = section[1]?.toLowerCase() === "alias";
+			const entry = inAlias ? /^\s*([\w-]+)\s*=\s*(.*)$/.exec(line) : null;
+			if (entry && entry[1]?.toLowerCase() === name.toLowerCase()) found = (entry[2] ?? "").trim().replace(/^"(.*)"$/, "$1");
+		}
+	}
+	return found;
+}
+
+/** The hooks in the repository holding `dir`, by name. */
+async function gitHooks(dir: string): Promise<string[] | undefined> {
+	const repo = await gitDir(dir);
+	if (repo === undefined) return undefined;
+	return (await readdir(join(repo, "hooks")).catch(() => [] as string[])).filter((name) => !name.endsWith(".sample")).sort();
 }
 
 function isShellScript(path: string, text: string): boolean {
@@ -1173,23 +1436,34 @@ function isShellScript(path: string, text: string): boolean {
 	return /^#!.*\b(ba|z|k|da)?sh\b/.test(first);
 }
 
+// Make variables that name a tool on PATH, judged by name like any command.
+const MAKE_TOOLS = /^\$\{(CC|CXX|CPP|LD|AR|AS|FC|RANLIB|STRIP|NM|OBJCOPY|MAKE|RM|CP|MV|MKDIR|INSTALL|LN|ECHO|SED|AWK|GREP|TAR|PKG_CONFIG|GO|CARGO|NPM|NODE|PYTHON|PYTHON3|PIP|DOCKER|KUBECTL|GIT|SHELL)\}$/;
+
 /**
  * What a makefile runs, as shell text, and the files it includes. Continuation lines are joined; recipe lines
- * (after a tab, or after `;` on a rule line) lose their `@`, `-`, and `+`; `$(shell …)` anywhere is run too.
- * Variables set to a literal value are expanded; any other make reference becomes `${NAME}`, so the shell scan
- * sees a value set at runtime. `$$` is the shell's `$`.
+ * (after a tab, or after `;` on a rule line) lose their `@`, `-`, and `+`; `$(shell …)` and `!=` anywhere run too.
+ * Variables are expanded through other variables, to a depth; a reference that cannot be resolved becomes `${NAME}`,
+ * so the shell scan sees a value set at runtime. `$$` is the shell's `$`. `functions` says the makefile uses
+ * `define`, `$(call)`, `$(eval)`, or `$(value)`, which the scan does not expand.
  */
-function makefile(text: string): { shell: string; includes: string[] } {
+function makefile(text: string): { shell: string; includes: string[]; functions: boolean } {
 	const lines = text.replace(/\\\r?\n[ \t]*/g, " ").split("\n");
 	const vars = new Map<string, string | undefined>([["MAKE", "make"]]);
+	const shells = new Set<string>();
 	for (const line of lines) {
 		if (line.startsWith("\t")) continue;
 		const match = /^\s*(?:(?:export|override)\s+)*([A-Za-z_][\w.-]*)\s*(::?=|:::=|\?=|\+=|!=|=)\s*(.*)$/.exec(line);
 		if (!match?.[1]) continue;
 		const value = match[3]?.trim() ?? "";
-		vars.set(match[1], match[2] === "+=" || match[2] === "!=" || value.includes("$") ? undefined : value);
+		if (match[2] === "!=") {
+			// `X != cmd` runs cmd as make reads the file.
+			shells.add(value);
+			vars.set(match[1], undefined);
+		} else if (match[2] === "+=") {
+			const before = vars.get(match[1]);
+			vars.set(match[1], vars.has(match[1]) && before === undefined ? undefined : `${before ?? ""} ${value}`.trim());
+		} else if (match[2] !== "?=" || !vars.has(match[1])) vars.set(match[1], value);
 	}
-	const shells = new Set<string>();
 	const expand = (part: string, depth = 0): string => {
 		let out = "";
 		for (let i = 0; i < part.length; i++) {
@@ -1205,17 +1479,18 @@ function makefile(text: string): { shell: string; includes: string[] } {
 			} else if (next === "(" || next === "{") {
 				const end = closingBracket(part, i + 1);
 				const inner = part.slice(i + 2, end);
-				if (/^shell\s/.test(inner) && depth < MAX_NEST) {
-					shells.add(expand(inner.slice(6), depth + 1));
+				if (/^shell\s/.test(inner)) {
+					if (depth < MAX_NEST) shells.add(expand(inner.slice(6), depth + 1));
 					out += "${shell}";
 				} else {
 					const name = inner.split(/[\s:,]/)[0] || "make";
 					const value = vars.get(inner);
-					out += value !== undefined && depth < MAX_NEST ? value : `\${${name}}`;
+					out += value !== undefined && depth < MAX_NEST ? expand(value, depth + 1) : `\${${name}}`;
 				}
 				i = end;
 			} else {
-				out += `\${${next ?? ""}}`;
+				const value = vars.get(next ?? "");
+				out += value !== undefined && depth < MAX_NEST ? expand(value, depth + 1) : `\${${next ?? ""}}`;
 				i++;
 			}
 		}
@@ -1237,7 +1512,8 @@ function makefile(text: string): { shell: string; includes: string[] } {
 		if (rule?.[3]) recipes.push(expand(rule[3].trim().replace(/^[@+-]+/, "")));
 		else expand(line);
 	}
-	return { shell: [...recipes, ...shells].join("\n"), includes };
+	const functions = /\$[({](call|eval|value)\s|^\s*define\s/m.test(text);
+	return { shell: [...recipes, ...[...shells].map((cmd) => expand(cmd))].join("\n"), includes, functions };
 }
 
 /** The index of the bracket that closes the `(` or `{` at `start`, counting only that kind, or the text's end. */

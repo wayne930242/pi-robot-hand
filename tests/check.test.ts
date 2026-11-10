@@ -28,7 +28,8 @@ test("scripts the command runs are read; secret files, plain files, and binaries
 	// What it runs but cannot send is listed; the secret's contents never are.
 	assert.deepEqual(unread, [
 		{ kind: "missing", target: "secret.sh", detail: "secret_drop protects it, so it is never sent" },
-		{ kind: "missing", target: "blob.sh", detail: "is a binary file, not text" },
+		// secret.sh was sourced but not read, so a `cd` in it cannot be ruled out: the folder is unknown after it.
+		{ kind: "indirect", target: "blob.sh", detail: "is relative to a folder set at runtime" },
 		{ kind: "missing", target: staged, detail: "secret_drop protects it, so it is never sent" },
 	]);
 });

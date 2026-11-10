@@ -6,11 +6,13 @@
  */
 
 // Controls and format characters (bidirectional marks, zero-width characters, tag characters, soft hyphens),
-// line and paragraph separators, variation selectors, and the blank Hangul fillers.
-const HIDDEN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u115f\u1160\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu;
+// line and paragraph separators, spaces other than the ASCII one (which split words differently from what
+// runs), variation selectors, blank fillers and the blank braille cell, and runs of three or more combining
+// marks, which can stack over other text.
+const HIDDEN = /\p{M}{3,}|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\u115f\u1160\u2800\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu;
 
-function escape(char: string): string {
-	return `\\u{${(char.codePointAt(0) ?? 0).toString(16)}}`;
+function escape(chars: string): string {
+	return [...chars].map((char) => `\\u{${(char.codePointAt(0) ?? 0).toString(16)}}`).join("");
 }
 
 /** The text with hidden characters escaped; newlines and tabs stay unless `oneLine`. */
