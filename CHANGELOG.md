@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1
+
+- The `e` check no longer calls a command a mismatch because it serves only one step of the user's request, or because the request is about something else (in a live test, the user was testing the check itself and a model judged a harmless command against that). "Goes against the user's request" now means works against it: does what the user forbade, undoes what they asked for, or takes another way than the one they chose; the distance from the request goes in `gaps`. The Jev check is unchanged.
+
 ## 0.6.0
 
 - `robot_hand`: when pi has TypeSafe's Jev classifier (`typesafe/jev-latest`, in a pi with classifier models) and TypeSafe has a credential, Jev checks the command as the terminal selector opens. It reads the same redacted input as the `e` check (command, scripts, reason, the user's last message and later dialog answers, the untrusted log) and returns `match`, `partial`, or `mismatch` with probabilities, shown above the choices. `"jevCheck": false` in `~/.pi/agent/robot-hand.json` turns it off; it is on by default. A failure shows only the HTTP status, never the provider's text. Closing the selector aborts it. The verdict goes into the tool result and `details.jev`.
