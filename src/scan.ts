@@ -93,8 +93,55 @@ const CODE_RUNNERS: Record<string, readonly string[] | undefined> = {
 	swift: ["run", "test", "build"],
 	pip: ["install"], pip3: ["install"],
 };
-// git commands that run hooks.
-const HOOK_VERBS = new Set(["commit", "push", "merge", "rebase", "pull", "checkout", "switch", "am", "cherry-pick", "revert"]);
+// The git hooks git runs, by the commands that may run them (githooks(5)); "any" for a hook any command may run, such
+// as post-index-change, which runs whenever the index is written (`git status` refreshes it). A hook file with another
+// name counts for every command but the quiet ones.
+const COMMIT_VERBS = ["commit", "merge", "pull", "cherry-pick", "revert", "rebase", "am"];
+const HOOK_TRIGGERS = new Map<string, readonly string[] | "any">([
+	["applypatch-msg", ["am"]],
+	["pre-applypatch", ["am"]],
+	["post-applypatch", ["am"]],
+	["pre-commit", COMMIT_VERBS],
+	["pre-merge-commit", COMMIT_VERBS],
+	["prepare-commit-msg", COMMIT_VERBS],
+	["commit-msg", COMMIT_VERBS],
+	["post-commit", COMMIT_VERBS],
+	["post-rewrite", ["commit", "rebase", "am", "pull"]],
+	["pre-rebase", ["rebase", "pull"]],
+	["post-checkout", ["checkout", "switch", "clone", "worktree", "rebase", "pull", "bisect", "submodule"]],
+	["post-merge", ["merge", "pull"]],
+	["pre-push", ["push"]],
+	["reference-transaction", [...COMMIT_VERBS, "fetch", "push", "branch", "tag", "update-ref", "reset", "checkout", "switch", "clone", "worktree", "remote", "replace", "notes", "symbolic-ref", "bisect", "stash", "pack-refs", "gc", "maintenance", "reflog", "filter-branch", "fast-import", "submodule"]],
+	["pre-auto-gc", [...COMMIT_VERBS, "fetch", "gc", "maintenance", "receive-pack"]],
+	["post-index-change", "any"],
+	["fsmonitor-watchman", "any"],
+	["sendemail-validate", ["send-email"]],
+	["p4-changelist", ["p4"]],
+	["p4-prepare-changelist", ["p4"]],
+	["p4-post-changelist", ["p4"]],
+	["p4-pre-submit", ["p4"]],
+	...["pre-receive", "update", "proc-receive", "post-receive", "post-update", "push-to-checkout"].map((hook) => [hook, ["receive-pack"]] as const),
+]);
+// git commands that run no hook of their own, only the "any" ones. A command neither here nor in HOOK_TRIGGERS may run
+// every hook.
+const QUIET_VERBS = new Set([
+	"status", "diff", "log", "show", "blame", "annotate", "grep", "ls-files", "ls-tree", "ls-remote", "rev-parse", "rev-list", "cat-file",
+	"describe", "shortlog", "help", "version", "show-ref", "for-each-ref", "name-rev", "whatchanged", "var", "check-ignore",
+	"check-attr", "check-ref-format", "merge-base", "cherry", "range-diff", "format-patch", "config", "show-branch",
+	"count-objects", "verify-commit", "verify-tag", "diff-files", "diff-index", "diff-tree", "archive", "add", "rm", "mv",
+	"restore", "apply", "update-index", "read-tree", "write-tree", "hash-object", "mktree", "clean", "fsck", "init",
+]);
+const KNOWN_VERBS = new Set([...QUIET_VERBS, ...[...HOOK_TRIGGERS.values()].flatMap((verbs) => (verbs === "any" ? [] : verbs))]);
+// How a known verb is found in an alias value: a short one as a word (`am` would match inside `name`), a long one in
+// the value's letters alone, so no mix of escapes and quotes hides it. Built once, from the fixed list above.
+const VERB_FINDERS = [...KNOWN_VERBS].map((verb) => {
+	if (verb.length > 3 && /^[a-z-]+$/.test(verb)) {
+		const letters = verb.replace(/-/g, "");
+		return { verb, found: (_readings: readonly string[], valueLetters: string) => valueLetters.includes(letters) };
+	}
+	const word = new RegExp(`(^|[^a-z0-9-])${verb}($|[^a-z0-9-])`, "i");
+	return { verb, found: (readings: readonly string[]) => readings.some((reading) => word.test(reading)) };
+});
 // File names that commonly hold credentials: never sent to a checker, even when the command sources or runs them.
 const SECRET_FILES = [
 	/^\.env(\..*)?$/i,
@@ -1224,43 +1271,65 @@ class Scanner {
 			.filter((setting) => /^alias\.[^=]+=/i.test(setting))
 			.map((setting) => ({ name: setting.slice(6, setting.indexOf("=")).replace(/\.command$/i, "").toLowerCase(), value: setting.slice(setting.indexOf("=") + 1) }));
 		const aliases = [...fromLine, ...(configs === undefined ? [] : gitAliases(configs))];
-		// The hook verbs the command may run as: its own, or any an alias may reach.
-		const effective = new Set<string>(HOOK_VERBS.has(verb) ? [verb] : []);
+		// The commands git may run this as: its own, or, for an alias, every known command any alias names; `unknown`
+		// when one of them is not a known command (or an alias value names none), which may run every hook.
+		const verbs = new Set<string>();
+		let unknown = false;
 		if (aliases.some(({ name }) => name === verb.toLowerCase())) {
 			if (aliases.some(({ value }) => value.includes("!"))) {
 				this.note("indirect", line, `runs the git alias ${JSON.stringify(verb)}; the git config has aliases that run a shell command, which the check does not read`);
 				return;
 			}
-			// A hook verb is looked for in each value with every character but letters removed, so no mix of escapes and
-			// quotes hides it; `am`, too short for that, as a word in three readings (escapes as breaks, quotes and
-			// backslashes removed, and both).
-			const letters = aliases.map(({ value }) => value.toLowerCase().replace(/[^a-z]/g, ""));
-			const readings = aliases.flatMap(({ value }) => [
-				value.replace(/\\./g, " "),
-				value.replace(/["'\\]/g, ""),
-				value.replace(/\\(.)/g, (_all, char: string) => (/[ntb]/.test(char) ? " " : char)).replace(/["'\\]/g, ""),
-			]);
-			for (const hook of HOOK_VERBS) {
-				if (hook === "am" ? readings.some((reading) => AM_WORD.test(reading)) : letters.some((each) => each.includes(hook.replace(/-/g, "")))) effective.add(hook);
+			for (const { value } of aliases) {
+				// Three readings of the value: escapes as word breaks (`\t`), quotes and backslashes removed (`'com'mit`),
+				// and both; and its letters alone.
+				const readings = [
+					value.replace(/\\./g, " "),
+					value.replace(/["'\\]/g, ""),
+					value.replace(/\\(.)/g, (_all, char: string) => (/[ntb]/.test(char) ? " " : char)).replace(/["'\\]/g, ""),
+				];
+				const letters = value.toLowerCase().replace(/[^a-z]/g, "");
+				const named = VERB_FINDERS.filter(({ found }) => found(readings, letters)).map(({ verb: each }) => each);
+				if (named.length === 0) unknown = true;
+				for (const each of named) verbs.add(each);
 			}
-		}
-		if (effective.size === 0) return;
+		} else if (KNOWN_VERBS.has(verb)) verbs.add(verb);
+		else unknown = true;
+		// Only hooks any command may run: a repository or hooks folder the scan cannot see is not reported for these.
+		const quiet = !unknown && [...verbs].every((each) => QUIET_VERBS.has(each));
 		if (settings.some((setting) => /^core\.hookspath=/i.test(setting))) {
-			this.note("indirect", line, "runs git hooks from a folder set on the command line, which the check does not read");
+			if (!quiet) this.note("indirect", line, "runs git hooks from a folder set on the command line, which the check does not read");
 			return;
 		}
 		if (dir === undefined || configs === undefined) {
-			this.note("indirect", line, "may run git hooks of a repository set at runtime, which the check does not read");
+			if (!quiet) this.note("indirect", line, "may run git hooks of a repository set at runtime, which the check does not read");
 			return;
 		}
-		if (configs.some((config) => gitEntries(config).some(({ section, key }) => section === "core" && key === "hookspath"))) {
-			this.note("indirect", line, "runs git hooks (from core.hooksPath), which the check does not read");
-			return;
+		const present = new Set((await gitHooks(dir)) ?? []);
+		// A hooks folder from core.hooksPath is listed; one the scan cannot list is reported whole.
+		const paths = configs.flatMap((config) => gitEntries(config).filter(({ section, key }) => section === "core" && key === "hookspath").map(({ value }) => value));
+		let unlisted = false;
+		for (const path of paths) {
+			const listed = await hookFolder(dir, path);
+			if (listed === undefined || listed.length === 0) unlisted = true;
+			for (const hook of listed ?? []) present.add(hook);
 		}
-		// `--no-verify` skips only the hooks that could stop the command; the others still run.
-		const skipped = args.includes("--no-verify") || (effective.size === 1 && effective.has("commit") && args.includes("-n")) ? NO_VERIFY_HOOKS : new Set<string>();
-		const hooks = ((await gitHooks(dir)) ?? []).filter((hook) => !skipped.has(hook));
-		if (hooks.length > 0) this.note("indirect", line, `runs git hooks (${hooks.join(", ")}), which the check does not read`);
+		// `--no-verify` skips the hooks that could stop the command, for every command; `-n` only for commit.
+		const runs = (hook: string, each: string | undefined): boolean => {
+			if (NO_VERIFY_HOOKS.has(hook) && (args.includes("--no-verify") || (each === "commit" && args.includes("-n")))) return false;
+			const triggers = HOOK_TRIGGERS.get(hook);
+			if (each === undefined) return true;
+			if (triggers === undefined) return !QUIET_VERBS.has(each);
+			return triggers === "any" || triggers.includes(each);
+		};
+		const hooks = [...present].filter((hook) => [...verbs, ...(unknown ? [undefined] : [])].some((each) => runs(hook, each))).sort();
+		// git runs a hook only by its name; other files with a hook-like name (a word, a `-`, a word) are counted, in
+		// case a newer git runs them, and never shown. Helper files such as husky's `h` are left out.
+		const named = hooks.filter((hook) => HOOK_TRIGGERS.has(hook));
+		const others = hooks.filter((hook) => !HOOK_TRIGGERS.has(hook) && /^[a-z0-9]+-[^.]+$/i.test(hook)).length;
+		const listed = [...named, ...(others > 0 ? [`${others} other file${others === 1 ? "" : "s"} in the hooks folder`] : [])];
+		if (unlisted && !quiet) listed.push("from core.hooksPath");
+		if (listed.length > 0) this.note("indirect", line, `runs git hooks (${listed.join(", ")}), which the check does not read`);
 	}
 }
 
@@ -1586,8 +1655,6 @@ interface GitEntry {
 
 // `-c` settings that make git run a command.
 const COMMAND_SETTING = /^(credential\.(?:[^=]*\.)?helper=\s*!|core\.fsmonitor=(?!\s*(?:true|false|yes|no|on|off|0|1)?\s*$)|core\.sshcommand=|filter\.[^=]*\.(?:smudge|clean|process)=|diff\.[^=]*\.textconv=|merge\.[^=]*\.driver=)/i;
-// `am` as a git verb in an alias value: a word, with no letter or `-` beside it.
-const AM_WORD = /(^|[^a-z-])am($|[^a-z-])/i;
 // git commands that talk to a remote, which use credential helpers and the ssh command.
 const NETWORK_VERBS = new Set(["fetch", "pull", "push", "clone", "ls-remote", "remote", "submodule"]);
 
@@ -1628,6 +1695,26 @@ async function gitHooks(dir: string): Promise<string[] | undefined> {
 	const repo = await gitDir(dir);
 	if (repo === undefined) return undefined;
 	return (await readdir(join(repo, "hooks")).catch(() => [] as string[])).filter((name) => !name.endsWith(".sample")).sort();
+}
+
+/**
+ * The hooks in a core.hooksPath folder, by name: relative to the top of the work tree holding `dir`, `~` expanded;
+ * undefined when it cannot be listed.
+ */
+async function hookFolder(dir: string, path: string): Promise<string[] | undefined> {
+	let top: string | undefined;
+	for (let at = dir; ; at = dirname(at)) {
+		if (await stat(join(at, ".git")).catch(() => undefined)) {
+			top = at;
+			break;
+		}
+		if (dirname(at) === at) break;
+	}
+	const expanded = expandHome(path.trim());
+	const folder = isAbsolute(expanded) ? expanded : top === undefined ? undefined : resolve(top, expanded);
+	if (folder === undefined) return undefined;
+	const names = await readdir(folder).catch(() => undefined);
+	return names?.filter((name) => !name.endsWith(".sample"));
 }
 
 function isShellScript(path: string, text: string): boolean {

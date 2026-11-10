@@ -638,3 +638,52 @@ test("git config is read as git does, with no user config: CRLF, continued lines
 		}
 	}
 });
+
+test("git hooks by the commands that run them: ref updates, index writes, checkouts, gc, unknown commands, hooksPath folders, -n per command", async () => {
+	const home = folder();
+	const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+	process.env.HOME = home;
+	process.env.XDG_CONFIG_HOME = join(home, ".config");
+	try {
+		const hooks = (names: string[], config = "") => folder({ ".git/config": config, ...Object.fromEntries(names.map((name) => [`.git/hooks/${name}`, "#!/bin/sh\n"])) });
+		const notes = async (command: string, dir: string) => kinds((await findScripts(command, dir, never)).unread).join("\n");
+		const cases: [string, string, RegExp | ""][] = [
+			["reference-transaction", "git branch feat", /runs git hooks \(reference-transaction\)/],
+			["reference-transaction", "git fetch origin", /reference-transaction/],
+			["reference-transaction", "git tag v1", /reference-transaction/],
+			["reference-transaction", "git log", ""],
+			["post-index-change", "git add .", /runs git hooks \(post-index-change\)/],
+			["post-index-change", "git status", /post-index-change/],
+			["post-checkout", "git worktree add ../w", /post-checkout/],
+			["post-checkout", "git clone https://x/r", /post-checkout/],
+			["post-checkout", "git add .", ""],
+			["pre-auto-gc", "git gc --auto", /pre-auto-gc/],
+			["pre-commit", "git frobnicate", /runs git hooks \(pre-commit\)/],
+			["pre-commit", "git status", ""],
+			["pre-commit", "git branch feat", ""],
+		];
+		for (const [hook, command, expected] of cases) {
+			const got = await notes(command, hooks([hook]));
+			if (expected === "") assert.equal(got, "", `${hook} / ${command}`);
+			else assert.match(got, expected, `${hook} / ${command}`);
+		}
+		// A file git never runs by that name is counted, not named.
+		assert.match(await notes("git commit -m x", hooks(["pre-commit", "pre-x\u001b[2Jy", "h", "husky.sh"])), /runs git hooks \(pre-commit, 1 other file in the hooks folder\)/);
+		// core.hooksPath: the folder is listed from the top of the work tree and filtered like .git/hooks.
+		const husky = folder({ ".git/config": "[core]\n\thooksPath = .husky\n", ".husky/pre-commit": "#!/bin/sh\n", "sub/x": "" });
+		assert.match(await notes("git commit -m x", join(husky, "sub")), /runs git hooks \(pre-commit\)/);
+		assert.equal(await notes("git status", husky), "");
+		// An alias naming no known command may run every hook.
+		assert.match(await notes("git x", hooks(["pre-push"], "[alias]\n\tx = frobnicate\n")), /pre-push/);
+		// `-n` is commit's --no-verify; checkout runs none of those hooks, merge's -n skips none.
+		const mixed = hooks(["pre-commit", "post-commit", "pre-merge-commit"], "[alias]\n\tci = commit\n\tco = checkout\n");
+		assert.match(await notes("git ci -n -m x", mixed), /runs git hooks \(post-commit\)/);
+		const merging = hooks(["pre-commit", "post-commit", "pre-merge-commit"], "[alias]\n\tci = commit\n\tmg = merge\n");
+		assert.match(await notes("git mg -n feat", merging), /pre-merge-commit/);
+	} finally {
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+});

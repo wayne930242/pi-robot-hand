@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
@@ -255,6 +255,8 @@ test("the first e asks for a model, checks the command with its scripts and the 
 	assert.match(screen, /說是看狀態，實際會刪檔。/);
 	assert.match(text, /declined.*verdict: mismatch.*刪除 \/var\/www。.*Differences: 說是看狀態/s);
 	assert.deepEqual((result.details as { check?: unknown }).check, { model: "openai/luna", verdict: "mismatch" });
+	// The model is saved in the background, so the selector does not wait on the disk.
+	for (let i = 0; i < 200 && !existsSync(join(agentDir, "robot-hand.json")); i++) await new Promise((resolve) => setTimeout(resolve, 5));
 	assert.equal(JSON.parse(readFileSync(join(agentDir, "robot-hand.json"), "utf8")).checkModel, "openai/luna");
 	assert.equal(harness.selects.length, 1);
 });

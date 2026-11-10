@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.2
+
+- git hooks are matched to the git commands that run them, from a table of git's hooks, instead of a short list of commands: `reference-transaction` for any command that updates a ref (`branch`, `tag`, `fetch`, `reset`, `stash`, …), `post-index-change` for any command (`git add`, and `git status` when it refreshes the index), `post-checkout` for `clone`, `worktree`, and `bisect` too, `pre-auto-gc` for `gc` and `fetch`. A git command the scan does not know, and an alias whose values name none it knows, may run every hook. A `core.hooksPath` folder is listed from the top of the work tree and filtered the same way, so a husky repository's `git status` is not flagged; a folder the scan cannot list is still reported. Other files with a hook-like name are counted, never shown.
+- `-n` skips commit's hooks only for commit: an alias set that also defines `co = checkout` no longer keeps them in the list.
+- A test that read the saved check model before its background write finished now waits for it.
+
 ## 0.7.1
 
 - git config is read the way git reads it where that is safe, and over-read where it is not, so a setting that runs code cannot hide in an odd layout: CRLF line ends, escaped quotes in section names, old `[section.sub]` headers, entries on the header's line, and the config read both with and without backslash line continuation (only CRLF or LF ends a line; a lone CR does not). Every value of a setting counts, not the last one. Fixes a 0.7.0 case where `[filter "a\"b"]` hid its filter command.
