@@ -1522,13 +1522,20 @@ function gitIncludes(config: string): string[] {
 /**
  * The entries of a git config text, as section (lower case, without a subsection), key (lower case), and value
  * (outer quotes removed). As git reads it: a subsection may hold escaped quotes (`[filter "a\"b"]`), the old
- * `[section.sub]` form names `section`, and an entry may follow its header on the same line.
+ * `[section.sub]` form names `section`, an entry may follow its header on the same line, and CRLF ends a line.
+ * Whether a trailing backslash continues a line depends on quotes and comments; rather than decide, the text is
+ * read both ways and the entries of both kept, so a setting either reading finds is reported.
  */
 function gitEntries(config: string): { section: string; key: string; value: string }[] {
+	const text = config.replace(/\r\n/g, "\n");
+	const joined = text.replace(/(?<!\\)((?:\\\\)*)\\\n/g, "$1");
+	return joined === text ? gitLines(text) : [...gitLines(text), ...gitLines(joined)];
+}
+
+function gitLines(text: string): { section: string; key: string; value: string }[] {
 	const entries: { section: string; key: string; value: string }[] = [];
 	let section = "";
-	// CRLF files read the same, and a line ending in an odd number of backslashes continues on the next.
-	for (const line of config.replace(/\r\n?/g, "\n").replace(/(?<!\\)((?:\\\\)*)\\\n/g, "$1").split("\n")) {
+	for (const line of text.split("\n")) {
 		const header = /^\s*\[\s*([^\]\s"]+)(?:\s+"(?:[^"\\\n]|\\.)*")?\s*\]/.exec(line);
 		if (header) section = (header[1] ?? "").split(".")[0]?.toLowerCase() ?? "";
 		const entry = /^\s*([\w-]+)\s*=\s*(.*)$/.exec(header ? line.slice(header[0].length) : line);

@@ -559,6 +559,10 @@ test("round 3: git config that runs commands, from -c, the repository, and inclu
 		assert.match(kinds((await findScripts("git status", crlf, never)).unread).join("\n"), /\(filter clean\)/);
 		const continued = folder({ ".git/config": "[core]\n\ta = x \\\n[x]\n\thooksPath = ./h2\n" });
 		assert.match(kinds((await findScripts("git commit -m x", continued, never)).unread).join("\n"), /from core\.hooksPath/);
+		// A backslash in a comment does not continue the line, and a lone CR does not end one: still found.
+		for (const config of ["[core]\n\ta = x ; c \\\n\thooksPath = ./h\n", "[x]\n# c \\\n[core]\n\thooksPath = ./h\n", "[core]\n\tfoo = 1\r[x]\n\thooksPath = ./h\n"]) {
+			assert.match(kinds((await findScripts("git commit -m x", folder({ ".git/config": config }), never)).unread).join("\n"), /from core\.hooksPath/, JSON.stringify(config));
+		}
 		const sameLine = folder({ ".git/config": "[alias] st = !./evil.sh\n[core] hooksPath = h\n" });
 		assert.match(kinds((await findScripts("git st", sameLine, never)).unread).join("\n"), /git alias "st"/);
 		assert.match(kinds((await findScripts("git commit -m x", sameLine, never)).unread).join("\n"), /from core\.hooksPath/);
