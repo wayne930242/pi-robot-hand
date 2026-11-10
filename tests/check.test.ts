@@ -18,24 +18,28 @@ test("scripts the command runs are read; secret files, plain files, and binaries
 	writeFileSync(join(agentDir, "secret-drop", "staging", "x.sh"), "#!/bin/sh\nstaged\n");
 	writeFileSync(join(agentDir, "secret-drop", "registry.json"), JSON.stringify({ version: 1, entries: [{ path: join(dir, "secret.sh"), placement: { mode: "file" }, label: "x", updatedAt: "" }] }));
 	const { isSecret } = await loadSecrets(join(agentDir, "secret-drop"));
-	const scripts = await findScripts(
-		`python3 run.py && ./tool --flag; source secret.sh; cat .env | sh blob.sh; sh ${join(agentDir, "secret-drop", "staging", "x.sh")}`,
-		dir,
-		isSecret,
-	);
+	const staged = join(agentDir, "secret-drop", "staging", "x.sh");
+	const { scripts, unread } = await findScripts(`python3 run.py && ./tool --flag; source secret.sh; cat .env | sh blob.sh; sh ${staged}`, dir, isSecret);
 	assert.deepEqual(
 		scripts.map((script) => script.path),
 		[join(dir, "run.py"), join(dir, "tool")],
 	);
 	assert.equal(scripts[0]?.text, "print('hi')\n");
+	// What it runs but cannot send is listed; the secret's contents never are.
+	assert.deepEqual(unread, [
+		{ kind: "missing", target: "secret.sh", detail: "secret_drop protects it, so it is never sent" },
+		{ kind: "missing", target: "blob.sh", detail: "is a binary file, not text" },
+		{ kind: "missing", target: staged, detail: "secret_drop protects it, so it is never sent" },
+	]);
 });
 
 test("a long script is cut and marked", async () => {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "robot-hand-check-")));
 	writeFileSync(join(dir, "big.sh"), `#!/bin/sh\n${"echo x\n".repeat(5000)}`);
-	const [script] = await findScripts("sh big.sh", dir, () => false);
-	assert.equal(script?.truncated, true);
-	assert.equal(script?.text.length, 16_000);
+	const { scripts, unread } = await findScripts("sh big.sh", dir, () => false);
+	assert.equal(scripts[0]?.truncated, true);
+	assert.equal(scripts[0]?.text.length, 16_000);
+	assert.deepEqual(unread, [{ kind: "truncated", target: "big.sh", detail: "only the first 16 KB of 35 KB were read" }]);
 });
 
 test("a reply outside the asked JSON is shown as is with verdict unclear", () => {
@@ -74,7 +78,7 @@ test("secret values are hidden from the check model wherever they appear", async
 	writeFileSync(drop + "/registry.json", JSON.stringify({ version: 1, entries: [{ path: join(dir, ".env"), placement: { mode: "env", key: "API_TOKEN", quote: "auto" }, label: "t", updatedAt: "" }] }));
 	writeFileSync(join(dir, "uses.sh"), "curl -H 'Authorization: tok-s3cret-123' example.com\n");
 	const secrets = await loadSecrets(drop);
-	const scripts = await findScripts("bash uses.sh", dir, secrets.isSecret);
+	const { scripts } = await findScripts("bash uses.sh", dir, secrets.isSecret);
 	const input = redactInput({ command: "TOKEN=tok-s3cret-123 bash uses.sh", kind: "shell", reason: "r", userMessage: "my token is tok-s3cret-123", scripts }, secrets.redact);
 	const prompt = String(checkContext(input).messages[0]?.content);
 	assert.doesNotMatch(prompt, /tok-s3cret-123/);
@@ -144,7 +148,7 @@ test("secrets are redacted before any cut, so no part of one survives", async ()
 	for (const text of [lastUserText(branch, redact) ?? "", after.log ?? "", ...after.replies]) assert.doesNotMatch(text, /ghp_A/);
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "robot-hand-check-")));
 	writeFileSync(join(dir, "big.sh"), `#!/bin/sh\n${"#".repeat(15_980)}${token}\n`);
-	const [script] = await findScripts("sh big.sh", dir, () => false, redact);
+	const [script] = (await findScripts("sh big.sh", dir, () => false, redact)).scripts;
 	assert.doesNotMatch(script?.text ?? "", /ghp_A/);
 });
 

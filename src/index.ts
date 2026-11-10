@@ -31,11 +31,13 @@ import {
 	runJevCheck,
 	saveCheckModel,
 	settingsPath,
+	type Unread,
 	type Verdict,
 } from "./check.ts";
 import { openDialog } from "./dialog.ts";
 import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, resultText, toOffer } from "./hand.ts";
 import { HandSelect, type Picked } from "./hand-select.ts";
+import { printable } from "./printable.ts";
 import { redactThrough } from "./secret-drop/redact.ts";
 import { dialogOptions } from "./secret-drop/secret-input.ts";
 import { checkRun, cleanup, type Exec, findShell, type HerdrRun, outcomeText, startRun } from "./herdr.ts";
@@ -49,6 +51,8 @@ interface HandDetails {
 	check?: { model: string; verdict: Verdict };
 	/** Present when the automatic Jev check finished before the user chose. */
 	jev?: { model: string; verdict: Verdict };
+	/** How many things the selector listed as run but not read by the checks; present when it listed any. */
+	unread?: number;
 }
 
 export const HERDR_RESULT_TYPE = "robot-hand-herdr";
@@ -79,13 +83,22 @@ const Params = Type.Object({
 async function checkInput(offer: Offer, reason: string, ctx: ExtensionContext, agentDir: string, events: ExtensionAPI["events"]): Promise<CheckInput> {
 	const dialogTools = loadDialogTools(settingsPath(agentDir));
 	const secrets = await loadSecrets(join(agentDir, "secret-drop"), (text) => redactThrough(events, text));
-	const scripts = offer.kind === "shell" ? await findScripts(offer.command, ctx.cwd, secrets.isSecret, secrets.redact) : [];
+	const { scripts, unread } = offer.kind === "shell" ? await findScripts(offer.command, ctx.cwd, secrets.isSecret, secrets.redact) : { scripts: [], unread: [] };
 	const branch = ctx.sessionManager.getBranch();
 	const after = afterUserMessage(branch, secrets.redact, dialogTools);
 	return redactInput(
-		{ command: offer.command, kind: offer.kind, reason, userMessage: lastUserText(branch, secrets.redact), replies: after.replies, since: after.log, scripts },
+		{ command: offer.command, kind: offer.kind, reason, userMessage: lastUserText(branch, secrets.redact), replies: after.replies, since: after.log, scripts, unread },
 		secrets.redact,
 	);
+}
+
+/**
+ * One line for the agent: what the selector told the user the checks could not read. Targets, and the names a
+ * detail quotes, are untrusted: each is JSON-escaped, so no line break or quote in a file name reaches the agent raw.
+ */
+function unreadSummary(unread: readonly Unread[]): string {
+	const items = unread.map((item) => `${item.kind} ${JSON.stringify(item.target)} (${JSON.stringify(item.detail).slice(1, -1)})`).join("; ");
+	return `The selector told the user the checks could not read all of what the command runs: ${items}.`;
 }
 
 export function createRobotHand(
@@ -152,7 +165,7 @@ export function createRobotHand(
 			reason: string,
 			ctx: ExtensionContext,
 			signal: AbortSignal,
-		): Promise<{ picked: Picked; check?: CheckResult; jev?: CheckResult }> => {
+		): Promise<{ picked: Picked; check?: CheckResult; jev?: CheckResult; unread?: Unread[] }> => {
 			const settings = settingsPath(agentDir);
 			let saved = loadCheckModel(settings);
 			let input: Promise<CheckInput> | undefined;
@@ -192,6 +205,8 @@ export function createRobotHand(
 									throw error;
 								}
 							},
+							// The scan reads local files only and sends nothing, so it runs as the selector opens.
+							...(offer.kind === "shell" ? { unread: gather().then((gathered) => gathered.unread ?? []) } : {}),
 							...(classify
 								? {
 										jev: async (signal: AbortSignal) => {
@@ -211,7 +226,7 @@ export function createRobotHand(
 					else signal.addEventListener("abort", () => select?.cancel(), { once: true });
 					return select;
 				}, dialogOptions());
-				return { picked, check: select?.result, jev: select?.jevResult };
+				return { picked, check: select?.result, jev: select?.jevResult, unread: select?.unreadResult };
 			} finally {
 				select?.cancel();
 			}
@@ -256,6 +271,7 @@ export function createRobotHand(
 					let refused = false;
 					let checked: CheckResult | undefined;
 					let jevChecked: CheckResult | undefined;
+					let unread: Unread[] | undefined;
 					try {
 						const labels = choices.map((option) => option.label);
 						let at: number | undefined;
@@ -265,6 +281,7 @@ export function createRobotHand(
 							refused = picked.picked === "refuse";
 							checked = picked.check;
 							jevChecked = picked.jev;
+							unread = picked.unread;
 						} else if (dialog.open) {
 							const picked = await ctx.ui.select(title, labels, { signal: dialog.signal });
 							const found = labels.indexOf(picked ?? "");
@@ -289,7 +306,7 @@ export function createRobotHand(
 						runs.set(run.token, { run, ticks: 0, busy: false });
 						timer ??= setInterval(watch, WATCH_MS);
 					}
-					const summary = [jevChecked, checked].map((result) => (result ? `\n\n${checkSummary(result)}` : "")).join("");
+					const summary = [jevChecked, checked].map((result) => (result ? `\n\n${checkSummary(result)}` : "")).join("") + (unread?.length ? `\n\n${unreadSummary(unread)}` : "");
 					return {
 						content: [{ type: "text", text: `${resultText(choice, offer)}${summary}` }],
 						details: {
@@ -298,6 +315,7 @@ export function createRobotHand(
 							...(dialog.remote ? { answeredFrom: "browser" } : {}),
 							...(checked ? { check: { model: checked.model, verdict: checked.verdict } } : {}),
 							...(jevChecked ? { jev: { model: jevChecked.model, verdict: jevChecked.verdict } } : {}),
+							...(unread?.length ? { unread: unread.length } : {}),
 						} satisfies HandDetails,
 						// The next move is the user's; a follow-up from the agent would only talk over it. After a decline or
 						// refusal the agent answers.
@@ -309,8 +327,8 @@ export function createRobotHand(
 			},
 
 			renderCall(args, theme) {
-				const head = `${theme.fg("toolTitle", theme.bold("robot_hand "))}${theme.fg("dim", args.reason ?? "")}`;
-				const command = args.command ? (args.kind === "pi" ? args.command : `! ${args.command}`) : "";
+				const head = `${theme.fg("toolTitle", theme.bold("robot_hand "))}${theme.fg("dim", printable(args.reason ?? "", true))}`;
+				const command = printable(args.command ? (args.kind === "pi" ? args.command : `! ${args.command}`) : "");
 				const lines = command.split("\n").map((line: string) => `  ${theme.fg("accent", line)}`);
 				return new Text([head, ...lines].join("\n"), 0, 0);
 			},
@@ -323,7 +341,9 @@ export function createRobotHand(
 				}
 				if (details.status === "waiting") return new Text(theme.fg("dim", "Waiting for you to take the command"), 0, 0);
 				const checks = [details.jev, details.check].filter((check) => check !== undefined);
-				const checked = checks.map((check) => theme.fg("dim", ` · checked by ${check.model}: ${check.verdict}`)).join("");
+				const checked =
+					checks.map((check) => theme.fg("dim", ` · checked by ${check.model}: ${check.verdict}`)).join("") +
+					(details.unread ? theme.fg("warning", ` · ${details.unread} not read by the checks`) : "");
 				if (details.status === "prompt") return new Text(`${theme.fg("success", "✓ ")}In your prompt — press Enter to run it${checked}`, 0, 0);
 				if (details.status === "clipboard") return new Text(`${theme.fg("success", "✓ ")}Copied to your clipboard${checked}`, 0, 0);
 				if (details.status === "herdr-type") return new Text(`${theme.fg("success", "✓ ")}In a new Herdr pane — press Enter there to run it${checked}`, 0, 0);

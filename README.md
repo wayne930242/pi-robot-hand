@@ -35,7 +35,7 @@ The agent calls `robot_hand` with a command and a one-line reason, and pi shows 
 - **Clipboard**: the raw command, for another terminal.
 - **Herdr pane**: when pi runs inside [Herdr](https://herdr.dev), a pane opens below pi with the command ready to edit and run, or already running. The pane is a real terminal, so password prompts, `y/N` confirmations, `ssh`, and full-screen programs work. When the command finishes, the pane closes and its output and exit code come back to the agent.
 
-Not sure what the command does? Press `e` in the selector and another model reads the command, the scripts it runs (a script extension or a `#!` line; files `secret_drop` protects are never read), the agent's reason, your last message, what you answered since in a dialog tool (`secret_drop`, `ask_user_question`, `ask_user`, and any tool named in `dialogTools` in `~/.pi/agent/robot-hand.json`; their records go over whole, each field redacted and cut to its start and end), and a short log of what happened after your message (marked untrusted), then says, in your language, what it will really do and whether that matches:
+Not sure what the command does? Press `e` in the selector and another model reads the command, the scripts it runs (see below; files `secret_drop` protects are never read), the agent's reason, your last message, what you answered since in a dialog tool (`secret_drop`, `ask_user_question`, `ask_user`, and any tool named in `dialogTools` in `~/.pi/agent/robot-hand.json`; their records go over whole, each field redacted and cut to its start and end), and a short log of what happened after your message (marked untrusted), then says, in your language, what it will really do and whether that matches:
 
 ```
  ✗ Does not match the stated intent — anthropic/claude-haiku-5-5
@@ -55,6 +55,21 @@ When pi has [TypeSafe](https://typesafe.ai)'s Jev classifier (a pi with classifi
 ```
 
 Set `"jevCheck": false` in `~/.pi/agent/robot-hand.json` to turn it off; it is on by default. When Jev fails, the selector says so with the HTTP status only and the choices work as before.
+
+Both checks read the scripts the command runs, found by reading files, never by running anything: script files it names, the makefile and its includes for `make`, the `package.json` entry for `npm run`, `npm test`, `pnpm`, `yarn`, and `bun run` (with npm's `pre` and `post` scripts), and, inside shell scripts, makefile recipes, package scripts, and `sh -c` strings, the scripts those run in turn, three levels deep. They read up to five files, 16 KB of each.
+What a check cannot read, the selector lists above the verdicts, whatever the verdicts say:
+
+```
+ The checks cannot see all of what this runs:
+ ⚠ Not readable: ./scripts/cleanup.sh — does not exist
+ ⚠ Not followed: bash — runs code from standard input, which may be what the command downloads
+ ⚠ Read in part: deploy.sh — only the first 16 KB of 48 KB were read
+ ⚠ Not read: f.sh — is past the 5-file limit
+```
+
+**Not readable**: a file it runs is missing, not a regular file, a binary in the project, or protected by `secret_drop`. **Not followed**: the code comes from elsewhere: a download piped to a shell, standard input, a process substitution, a path or command name set at runtime, files matching a glob, a package `npx` or `dlx` may download, install scripts, or a task runner the scan does not read (`just`, `rake`, `gradle`, and the like). **Read in part**: a file over 16 KB. **Not read**: the five-file limit or the depth limit.
+Both checks get the list. While it is not empty, neither can answer match: a match becomes partial, shown as "Matches what it read; parts it could not read", and the agent's result names what was not read.
+File names, the checker's words, and the command are drawn with terminal controls, carriage returns, and bidirectional or invisible characters shown as `\u{…}` escapes, so none of them can redraw the selector; names reach the checker as JSON strings.
 
 When either check says the command does not match, the selector adds **Report the mismatch and refuse**. It works like **No, thanks**, placing and running nothing, and also tells the agent the reason: the check found a mismatch, with each verdict. Another extension answering the selector never sees this choice.
 

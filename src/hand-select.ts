@@ -3,12 +3,15 @@
  * `e` checks with the saved model, or opens the model list when none is saved, the saved one is
  * gone, or the last check failed; `E` always opens the list. The check never closes the selector.
  * When Jev is available, it checks on its own as the selector opens. A mismatch from either check adds a
- * choice to refuse the command and report the verdict to the agent.
+ * choice to refuse the command and report the verdict to the agent. Above the checks, the selector lists what the
+ * command runs that the checks could not read, found by code and shown whatever a check says. Every untrusted
+ * text it draws (the command, file names, the checker's words) goes through `printable`.
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, decodeKittyPrintable, type Focusable, getKeybindings, isKeyRelease, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { type CheckResult, probabilityText, type Verdict } from "./check.ts";
+import { type CheckResult, probabilityText, type Unread, type UnreadKind, type Verdict } from "./check.ts";
+import { printable } from "./printable.ts";
 
 export interface HandSelectProps {
 	/** The same title the plain selector shows: the reason, a blank line, then the command. */
@@ -26,6 +29,8 @@ export interface HandSelectProps {
 	check: (model: string, signal: AbortSignal) => Promise<CheckResult>;
 	/** The automatic Jev check, started when the selector opens; absent when Jev is off or not configured. Aborted on close. */
 	jev?: (signal: AbortSignal) => Promise<CheckResult>;
+	/** What the command runs that the checks could not read; absent for a pi command, which runs no file. */
+	unread?: Promise<Unread[]>;
 	/** Lines the selector may take; the command and check give way first. Default: 85% of the terminal. */
 	maxLines?: () => number;
 }
@@ -42,6 +47,13 @@ type State =
 	| { kind: "failed"; model: string; error: string };
 
 const MAX_LISTED = 8;
+const MAX_UNREAD_SHOWN = 6;
+const UNREAD_LABEL: Record<UnreadKind, string> = {
+	missing: "Not readable",
+	indirect: "Not followed",
+	truncated: "Read in part",
+	skipped: "Not read",
+};
 const MARK: Record<Verdict, { icon: string; color: "success" | "warning" | "error" | "muted"; text: string }> = {
 	match: { icon: "✓", color: "success", text: "Matches the stated intent" },
 	partial: { icon: "!", color: "warning", text: "Partly matches the stated intent" },
@@ -54,6 +66,7 @@ export class HandSelect implements Component, Focusable {
 	private cursor = 0;
 	private state: State = { kind: "idle" };
 	private jevState: State = { kind: "idle" };
+	private unreadState: { kind: "idle" } | { kind: "done"; list: Unread[] } | { kind: "failed"; error: string } = { kind: "idle" };
 	private readonly jevRun = new AbortController();
 	private picker: { filter: string; cursor: number } | undefined;
 	private closed = false;
@@ -70,6 +83,23 @@ export class HandSelect implements Component, Focusable {
 		this.requestRender = requestRender;
 		this.done = done;
 		if (props.jev) this.startJev(props.jev);
+		props.unread?.then(
+			(list) => {
+				if (this.closed) return;
+				this.unreadState = { kind: "done", list };
+				this.requestRender();
+			},
+			(error: unknown) => {
+				if (this.closed) return;
+				this.unreadState = { kind: "failed", error: error instanceof Error ? error.message : String(error) };
+				this.requestRender();
+			},
+		);
+	}
+
+	/** What the selector showed as not read, once the scan finished. */
+	get unreadResult(): Unread[] | undefined {
+		return this.unreadState.kind === "done" ? this.unreadState.list : undefined;
 	}
 
 	/** The last finished check, for the tool's result. */
@@ -218,15 +248,30 @@ export class HandSelect implements Component, Focusable {
 
 	invalidate(): void {}
 
+	private unreadLines(inner: number): string[] {
+		const t = this.theme;
+		const wrap = (text: string) => wrapTextWithAnsi(text, inner);
+		const state = this.unreadState;
+		if (state.kind === "failed") return wrap(t.fg("warning", `Could not list what the command runs: ${printable(state.error, true)}`));
+		if (state.kind !== "done" || state.list.length === 0) return [];
+		const lines = wrap(t.bold(t.fg("warning", "The checks cannot see all of what this runs:")));
+		for (const item of state.list.slice(0, MAX_UNREAD_SHOWN)) {
+			lines.push(...wrap(`${t.fg("warning", `⚠ ${UNREAD_LABEL[item.kind]}: `)}${t.fg("text", printable(item.target, true))}${t.fg("dim", ` — ${printable(item.detail, true)}`)}`));
+		}
+		const more = state.list.length - MAX_UNREAD_SHOWN;
+		if (more > 0) lines.push(t.fg("dim", `  … and ${more} more`));
+		return lines;
+	}
+
 	private jevLines(inner: number): string[] {
 		const t = this.theme;
 		const wrap = (text: string) => wrapTextWithAnsi(text, inner);
 		const state = this.jevState;
 		if (state.kind === "checking") return wrap(t.fg("muted", "Jev is checking…"));
-		if (state.kind === "failed") return wrap(t.fg("dim", `Jev could not check: ${state.error}`));
+		if (state.kind === "failed") return wrap(t.fg("dim", `Jev could not check: ${printable(state.error, true)}`));
 		if (state.kind !== "done") return [];
 		const { result } = state;
-		const mark = MARK[result.verdict];
+		const mark = markOf(result);
 		const scores = result.probabilities ? probabilityText(result.probabilities) : "";
 		return wrap(`${t.bold(t.fg(mark.color, `${mark.icon} Jev: ${mark.text}`))}${scores ? t.fg("dim", ` (${scores})`) : ""}`);
 	}
@@ -237,14 +282,15 @@ export class HandSelect implements Component, Focusable {
 		const state = this.state;
 		if (state.kind === "checking") return wrap(t.fg("muted", `Checking with ${state.model}…`));
 		if (state.kind === "failed") {
-			return [...wrap(t.fg("error", `${state.model} could not check: ${state.error}`)), ...wrap(t.fg("dim", "Press e to pick another model."))];
+			return [...wrap(t.fg("error", `${state.model} could not check: ${printable(state.error, true)}`)), ...wrap(t.fg("dim", "Press e to pick another model."))];
 		}
 		if (state.kind !== "done") return [];
 		const { result } = state;
-		const mark = MARK[result.verdict];
+		const mark = markOf(result);
 		const lines = wrap(`${t.bold(t.fg(mark.color, `${mark.icon} ${mark.text}`))} ${t.fg("dim", `— ${result.model}`)}`);
-		if (result.does) lines.push(...wrap(t.fg("text", result.does)));
-		if (result.gaps) lines.push(...wrap(t.fg("warning", result.gaps)));
+		// The checker read untrusted scripts; what it writes is drawn as text, never as terminal control.
+		if (result.does) lines.push(...wrap(t.fg("text", printable(result.does))));
+		if (result.gaps) lines.push(...wrap(t.fg("warning", printable(result.gaps))));
 		return lines;
 	}
 
@@ -272,7 +318,7 @@ export class HandSelect implements Component, Focusable {
 		const inner = Math.max(10, width - 4);
 		const wrap = (text: string) => wrapTextWithAnsi(text, inner);
 
-		const [head = "", ...rest] = this.props.title.split("\n");
+		const [head = "", ...rest] = printable(this.props.title).split("\n");
 		const heading = wrap(t.bold(t.fg("text", head)));
 		let command = rest.map((line) => t.fg("accent", line));
 		const listed = this.rows();
@@ -287,7 +333,7 @@ export class HandSelect implements Component, Focusable {
 					: `↑↓ move · Enter choose · e check with ${saved && this.state.kind !== "failed" ? saved : "a model"} · E change model · Esc cancel`,
 			),
 		);
-		const check = this.picker ? this.pickerLines(inner) : [...this.jevLines(inner), ...this.checkLines(inner)];
+		const check = this.picker ? this.pickerLines(inner) : [...this.unreadLines(inner), ...this.jevLines(inner), ...this.checkLines(inner)];
 
 		// Keep the choices and help on screen; the command gives way before the check does.
 		const budget = (this.props.maxLines ?? defaultMaxLines)() - 2;
@@ -308,6 +354,10 @@ export class HandSelect implements Component, Focusable {
 		});
 		return [top, ...rows, bottom];
 	}
+}
+
+function markOf(result: CheckResult): (typeof MARK)[Verdict] {
+	return result.capped ? { ...MARK.partial, text: "Matches what it read; parts it could not read" } : MARK[result.verdict];
 }
 
 function defaultMaxLines(): number {
