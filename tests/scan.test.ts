@@ -584,6 +584,17 @@ test("git config is read as git does, with no user config: CRLF, continued lines
 		const hookAlias = folder({ ".git/config": "[alias]\n\tci = status\n\t; c \\\n\tci = commit\n[core]\n\tbare = false\n", ".git/hooks/pre-commit": "#!/bin/sh\n" });
 		assert.match(kinds((await findScripts("git ci -m x", hookAlias, never)).unread).join("\n"), /runs git hooks \(pre-commit\)/);
 		assert.deepEqual((await findScripts("git st", folder({ ".git/config": "[alias]\n\tst = status\n" }), never)).unread, []);
+		// Split quotes, chains of aliases, `-c` aliases, and config from the environment.
+		assert.match(kinds((await findScripts("git st", folder({ ".git/config": '[alias]\n\tst = "!"./evil.sh\n' }), never)).unread).join("\n"), /git alias "st"/);
+		const hooked = (config: string) => folder({ ".git/config": config, ".git/hooks/pre-commit": "#!/bin/sh\n" });
+		for (const [config, command] of [['[alias]\n\tci = "com"mit\n', "git ci -m x"], ["[alias]\n\ta = b\n\tb = commit\n", "git a -m x"], ["[core]\n\tbare = false\n", "git -c alias.st=commit st -m x"]]) {
+			assert.match(kinds((await findScripts(command ?? "", hooked(config ?? ""), never)).unread).join("\n"), /runs git hooks \(pre-commit\)/, command);
+		}
+		assert.match(kinds((await findScripts("git -c 'alias.st=!./evil.sh' st", folder(), never)).unread).join("\n"), /git alias "st"/);
+		for (const command of ["GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.st GIT_CONFIG_VALUE_0=x git st", "git --config-env=alias.st=X st"]) {
+			assert.match(kinds((await findScripts(command, folder(), never)).unread).join("\n"), /git config set at runtime/, command);
+		}
+		assert.deepEqual((await findScripts("git a", folder({ ".git/config": "[alias]\n\ta = b\n\tb = a\n" }), never)).unread, []);
 		// A backslash in a comment does not continue the line, and a lone CR does not end one: still found.
 		for (const config of ["[core]\n\ta = x ; c \\\n\thooksPath = ./h\n", "[x]\n# c \\\n[core]\n\thooksPath = ./h\n", "[core]\n\tfoo = 1\r[x]\n\thooksPath = ./h\n"]) {
 			assert.match(kinds((await findScripts("git commit -m x", folder({ ".git/config": config }), never)).unread).join("\n"), /from core\.hooksPath/, JSON.stringify(config));

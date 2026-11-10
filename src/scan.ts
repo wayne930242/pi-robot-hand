@@ -1193,10 +1193,16 @@ class Scanner {
 		let dir = where.cwd;
 		let verb: string | undefined;
 		const settings: string[] = [];
+		// Config the scan cannot see: `--config-env` and the GIT_CONFIG_* variables.
+		let hidden = assigns.some((assign) => /^GIT_CONFIG(_\w+)?=/.test(assign));
 		for (let i = 0; i < args.length && verb === undefined; i++) {
 			const arg = args[i] ?? "";
 			if (arg === "-C") dir = changeDir(dir, args[++i]);
 			else if (arg === "-c") settings.push(args[++i] ?? "");
+			else if (arg === "--config-env" || arg.startsWith("--config-env=")) {
+				hidden = true;
+				if (arg === "--config-env") i++;
+			}
 			else if (arg === "--git-dir" || arg === "--work-tree" || arg === "--namespace" || arg === "--exec-path") {
 				if (arg === "--git-dir" || arg === "--exec-path") dir = undefined;
 				i++;
@@ -1205,20 +1211,32 @@ class Scanner {
 		}
 		if (assigns.some((assign) => /^(GIT_DIR|GIT_COMMON_DIR|GIT_CONFIG\w*|GIT_EXEC_PATH)=/.test(assign))) dir = undefined;
 		if (verb === undefined) return;
-		if (settings.some((setting) => /^alias\./i.test(setting) && setting.includes("!"))) this.note("indirect", line, "runs a git alias that runs a shell command");
+		if (hidden) this.note("indirect", line, "takes git config set at runtime (GIT_CONFIG_* or --config-env), which may run commands the check does not read");
 		if (settings.some((setting) => COMMAND_SETTING.test(setting))) this.note("indirect", line, "sets git config on the command line that runs a command, which the check does not read");
 		const configs = await gitConfigs(dir);
 		for (const setting of configs === undefined ? [] : gitCommands(configs, NETWORK_VERBS.has(verb))) {
 			this.note("indirect", line, `runs a command git config sets (${setting}), which the check does not read`);
 		}
-		// Every value the alias may have, not the one git would pick: the scan reads the config two ways, and a
-		// value either finds counts.
-		const aliases = configs === undefined ? [] : gitAliases(configs, verb);
-		if (aliases.some((alias) => alias.startsWith("!"))) {
+		// Every value an alias may have, not the one git would pick, through chains of aliases, from `-c` and the
+		// config files: the scan reads the config two ways and does not unquote as git does, so any candidate counts.
+		const lookup = (name: string): string[] => [
+			...settings.filter((setting) => setting.toLowerCase().startsWith(`alias.${name.toLowerCase()}=`)).map((setting) => setting.slice(setting.indexOf("=") + 1)),
+			...(configs === undefined ? [] : gitAliases(configs, name)),
+		];
+		const verbs = [verb];
+		const values: string[] = [];
+		for (let i = 0; i < verbs.length && i < 16; i++) {
+			for (const value of lookup(verbs[i] ?? "")) {
+				values.push(value);
+				const next = value.replace(/["\\]/g, "").trim().split(/\s+/)[0] ?? "";
+				if (next && !verbs.includes(next)) verbs.push(next);
+			}
+		}
+		if (values.some((value) => value.includes("!"))) {
 			this.note("indirect", line, `runs the git alias ${JSON.stringify(verb)}, which runs a shell command the check does not read`);
 			return;
 		}
-		const effective = [verb, ...aliases.map((alias) => alias.split(/\s+/)[0] ?? "")].find((each) => HOOK_VERBS.has(each));
+		const effective = verbs.find((each) => HOOK_VERBS.has(each));
 		if (effective === undefined) return;
 		if (settings.some((setting) => /^core\.hookspath=/i.test(setting))) {
 			this.note("indirect", line, "runs git hooks from a folder set on the command line, which the check does not read");
