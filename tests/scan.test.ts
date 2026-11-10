@@ -544,6 +544,11 @@ test("round 3: git config that runs commands, from -c, the repository, and inclu
 		assert.match(status, /\(core\.fsmonitor\)/);
 		assert.doesNotMatch(status, /credential|filter/);
 		assert.match(kinds((await findScripts("git push", dir, never)).unread).join("\n"), /\(credential\.helper\)/);
+		// Only git-lfs's own filter commands are exempt, and an entry on its header's line counts.
+		const lfs = folder({ ".git/config": '[filter "lfs"]\n\tclean = git-lfs clean; ./evil.sh\n' });
+		assert.match(kinds((await findScripts("git status", lfs, never)).unread).join("\n"), /\(filter clean\)/);
+		const inline = folder({ ".git/config": "[core] fsmonitor = ./evil.sh\n" });
+		assert.match(kinds((await findScripts("git status", inline, never)).unread).join("\n"), /\(core\.fsmonitor\)/);
 		assert.match(kinds((await findScripts("git commit -m x", dir, never)).unread).join("\n"), /from core\.hooksPath/);
 		assert.match(kinds((await findScripts("git -c core.sshCommand='./s' fetch", folder(), never)).unread).join("\n"), /sets git config on the command line that runs a command/);
 	} finally {

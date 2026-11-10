@@ -1540,16 +1540,17 @@ function gitCommands(configs: readonly string[], network: boolean): string[] {
 	for (const config of configs) {
 		let section = "";
 		for (const line of config.split("\n")) {
-			const header = /^\s*\[\s*([^\]\s"]+)(?:\s+"([^"]*)")?/.exec(line);
+			const header = /^\s*\[\s*([^\]\s"]+)(?:\s+"[^"]*")?\s*\]/.exec(line);
 			if (header) section = (header[1] ?? "").toLowerCase();
-			const entry = /^\s*([\w-]+)\s*=\s*(.*)$/.exec(line);
+			// An entry may follow its section header on the same line: `[core] fsmonitor = …`.
+			const entry = /^\s*([\w-]+)\s*=\s*(.*)$/.exec(header ? line.slice(header[0].length) : line);
 			if (!entry) continue;
 			const key = (entry[1] ?? "").toLowerCase();
 			const value = (entry[2] ?? "").trim().replace(/^"(.*)"$/, "$1");
 			if (network && section === "credential" && key === "helper" && value.startsWith("!")) found.add("credential.helper");
 			else if (network && section === "core" && key === "sshcommand" && !/^ssh(\s|$)/.test(value)) found.add("core.sshCommand");
 			else if (section === "core" && key === "fsmonitor" && !/^(true|false|yes|no|on|off|0|1)?$/i.test(value)) found.add("core.fsmonitor");
-			else if (section === "filter" && ["smudge", "clean", "process"].includes(key) && !value.startsWith("git-lfs ")) found.add(`filter ${key}`);
+			else if (section === "filter" && ["smudge", "clean", "process"].includes(key) && !/^git-lfs (clean|smudge|filter-process)( -- %f)?$/.test(value)) found.add(`filter ${key}`);
 			else if ((section === "diff" && key === "textconv") || (section === "merge" && key === "driver")) found.add(`${section}.${key}`);
 		}
 	}
