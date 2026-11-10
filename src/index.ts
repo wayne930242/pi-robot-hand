@@ -35,7 +35,7 @@ import {
 	type Verdict,
 } from "./check.ts";
 import { openDialog } from "./dialog.ts";
-import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, resultText, toOffer } from "./hand.ts";
+import { busChoices, type Choice, dialogTitle, type Offer, options, promptText, REMOTE_CANCEL_TEXT, resultText, toOffer } from "./hand.ts";
 import { HandSelect, type Picked } from "./hand-select.ts";
 import { printable } from "./printable.ts";
 import { redactThrough } from "./secret-drop/redact.ts";
@@ -47,6 +47,8 @@ interface HandDetails {
 	status: "waiting" | Choice;
 	/** Present when another extension answered the selector. */
 	answeredFrom?: "browser";
+	/** Present when another extension cancelled the dialog (`robot-hand:answer` with `cancel: true`); Escape in the terminal leaves it out. */
+	cancelledFrom?: "remote";
 	/** Present when the user ran the `e` check before choosing. */
 	check?: { model: string; verdict: Verdict };
 	/** Present when the automatic Jev check finished before the user chose. */
@@ -294,7 +296,8 @@ export function createRobotHand(
 						pi.events.emit("herdr:blocked", { active: false });
 					}
 					// Refusing settles the published dialog as a cancel: other answerers never see that choice.
-					const choice = (won === undefined ? undefined : choices[won]?.choice) ?? (refused && !dialog.remote ? "refuse" : "cancel");
+					const cancelledRemotely = dialog.remoteCancel;
+					const choice = (won === undefined ? undefined : choices[won]?.choice) ?? (refused && !dialog.remote && !cancelledRemotely ? "refuse" : "cancel");
 
 					if (choice === "prompt") {
 						ctx.ui.setEditorText(text);
@@ -309,11 +312,12 @@ export function createRobotHand(
 					}
 					const summary = [jevChecked, checked].map((result) => (result ? `\n\n${checkSummary(result)}` : "")).join("") + (unread?.length ? `\n\n${unreadSummary(unread)}` : "");
 					return {
-						content: [{ type: "text", text: `${resultText(choice, offer)}${summary}` }],
+						content: [{ type: "text", text: `${cancelledRemotely ? REMOTE_CANCEL_TEXT : resultText(choice, offer)}${summary}` }],
 						details: {
 							command: text,
 							status: choice,
 							...(dialog.remote ? { answeredFrom: "browser" } : {}),
+							...(cancelledRemotely ? { cancelledFrom: "remote" } : {}),
 							...(checked ? { check: { model: checked.model, verdict: checked.verdict } } : {}),
 							...(jevChecked ? { jev: { model: jevChecked.model, verdict: jevChecked.verdict } } : {}),
 							...(unread?.length ? { unread: unread.length } : {}),

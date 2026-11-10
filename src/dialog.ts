@@ -15,10 +15,21 @@ type Reason = "closed" | "digest" | "malformed" | "not-allowed";
 const PREFIX = "robot-hand";
 const ANSWER_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const KEYS = new Set(["version", "id", "answerId", "digest", "selections", "text", "comment"]);
+// A cancel is `{version, id, answerId, cancel: true}` and nothing else: no digest, no choice, no words.
+const CANCEL_KEYS = new Set(["version", "id", "answerId", "cancel"]);
 
 /** SHA-256 of the canonical select form: the title and the choice labels, nothing else. */
 export function digestOf(title: string, labels: string[]): string {
 	return createHash("sha256").update(JSON.stringify(["pi-dialog/1", "select", title, labels]), "utf8").digest("hex");
+}
+
+function isCancel(a: Record<string, unknown>): boolean {
+	return Object.hasOwn(a, "cancel");
+}
+
+// A cancel is shaped or it is refused whole; there is no digest to check, so it ends the dialog whatever the dialog shows.
+function cancelShaped(a: Record<string, unknown>): boolean {
+	return a.version === 1 && typeof a.answerId === "string" && ANSWER_ID.test(a.answerId) && a.cancel === true && Object.keys(a).every((key) => CANCEL_KEYS.has(key));
 }
 
 // A selector takes exactly one index: no words, no comment. Returns that index, or why the whole answer is refused.
@@ -45,6 +56,7 @@ export function openDialog(bus: Bus, o: { toolCallId: string; title: string; cho
 	let by: By | undefined;
 	let winner: number | undefined;
 	let winnerAnswerId: string | undefined;
+	let remoteCancel = false;
 	// The flag is written before anything is closed or emitted, so the other claimant sees "closed".
 	const settle = (how: By, answerId?: string, between?: () => void): void => {
 		if (by) return;
@@ -59,6 +71,17 @@ export function openDialog(bus: Bus, o: { toolCallId: string; title: string; cho
 		if (a.id !== id) return;
 		const answerId = typeof a.answerId === "string" && ANSWER_ID.test(a.answerId) ? a.answerId : "";
 		const result = (accepted: boolean, reason?: Reason): void => bus.emit(`${PREFIX}:answer-result`, { version: 1, id, answerId, accepted, ...(reason ? { reason } : {}) });
+		if (isCancel(a)) {
+			const refused = by ? "closed" : cancelShaped(a) ? undefined : "malformed";
+			if (refused) return result(false, refused);
+			// Ends the selector like Escape does, but the closed event carries the answerId: that is how a remote cancel
+			// is told from a local Escape. The tool call goes on and returns; nothing aborts the turn.
+			return settle("cancel", answerId, () => {
+				remoteCancel = true;
+				local.abort();
+				result(true);
+			});
+		}
 		const verdict = by ? "closed" : check(a, digest, o.choices.length);
 		if (typeof verdict === "string") return result(false, verdict);
 		settle("remote", answerId, () => {
@@ -69,7 +92,7 @@ export function openDialog(bus: Bus, o: { toolCallId: string; title: string; cho
 		});
 	});
 	o.signal?.addEventListener("abort", onAbort, { once: true });
-	bus.emit(`${PREFIX}:pending`, { version: 1, id, toolCallId: o.toolCallId, digest, select: { title: o.title, choices: o.choices.map((choice) => ({ ...choice })), copy: o.copy } });
+	bus.emit(`${PREFIX}:pending`, { version: 1, id, toolCallId: o.toolCallId, digest, cancellable: true, select: { title: o.title, choices: o.choices.map((choice) => ({ ...choice })), copy: o.copy } });
 	if (o.signal?.aborted) settle("abort");
 	// signal: for `select`, aborts on the tool signal or a remote answer. open: false when an answer arrived during the
 	// `pending` emit, so the selector is not opened. finish: settles with the terminal's outcome (index, or undefined for
@@ -78,6 +101,8 @@ export function openDialog(bus: Bus, o: { toolCallId: string; title: string; cho
 		signal: AbortSignal.any(o.signal ? [o.signal, local.signal] : [local.signal]),
 		get open() { return by === undefined; },
 		get remote() { return by === "remote"; },
+		// True when another extension ended the dialog with a cancel; false for Escape in the terminal.
+		get remoteCancel() { return remoteCancel; },
 		// The accepted answer's id, once a remote answer has won.
 		get answerId() { return by === "remote" ? winnerAnswerId : undefined; },
 		finish(picked: number | undefined): number | undefined {

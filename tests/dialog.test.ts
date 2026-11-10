@@ -17,6 +17,7 @@ interface Pending {
 	id: string;
 	toolCallId: string;
 	digest: string;
+	cancellable?: true;
 	select: { title: string; choices: { label: string; note?: string; localOnly?: true; next?: "terminal" | "pane"; tagged?: true }[]; copy: string };
 }
 const GOOD = "answer-id-0123456789";
@@ -141,7 +142,8 @@ test("pending carries the id, the call, the digest of what the selector shows, a
 	assert.equal(pending.version, 1);
 	assert.match(pending.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 	assert.equal(pending.toolCallId, "call-1");
-	assert.deepEqual(Object.keys(pending).sort(), ["digest", "id", "select", "toolCallId", "version"]);
+	assert.equal(pending.cancellable, true);
+	assert.deepEqual(Object.keys(pending).sort(), ["cancellable", "digest", "id", "select", "toolCallId", "version"]);
 	assert.equal(pending.select.title, dialogTitle(toOffer("sudo apt upgrade", "shell"), "需要密碼"));
 	assert.equal(pending.select.copy, "sudo apt upgrade");
 	assert.deepEqual(
@@ -331,6 +333,125 @@ test("Escape closes with cancel and the terminal result is unchanged", async () 
 	assert.deepEqual(run.bus.of("robot-hand:closed").map((closed) => closed.by), ["cancel"]);
 	assert.equal(text(result), resultText("cancel", toOffer("sudo apt upgrade", "shell")));
 	assert.deepEqual(result.details, { command: "! sudo apt upgrade", status: "cancel" });
+});
+
+const cancelText = (result: { content: { type: string; text?: string }[] }) => text(result) ?? "";
+
+test("a remote cancel closes with cancel and its answerId, ends the selector, runs nothing, and does not abort the turn", async () => {
+	const turn = new AbortController();
+	const run = start(PARAMS, { signal: turn.signal });
+	const { id } = run.pending();
+	run.bus.emit("robot-hand:answer", { version: 1, id, answerId: GOOD, cancel: true });
+	assert.deepEqual(
+		run.bus.log.map((entry) => entry.channel).filter((channel) => channel.startsWith("robot-hand:")),
+		["robot-hand:pending", "robot-hand:answer", "robot-hand:answer-result", "robot-hand:closed"],
+	);
+	assert.deepEqual(run.bus.of("robot-hand:answer-result"), [{ version: 1, id, answerId: GOOD, accepted: true }]);
+	assert.deepEqual(run.bus.of("robot-hand:closed"), [{ version: 1, id, by: "cancel", answerId: GOOD }]);
+	const result = await run.done;
+	assert.equal(turn.signal.aborted, false, "the turn is not aborted");
+	assert.equal(run.state.editor, "");
+	assert.deepEqual(run.copied, []);
+	assert.deepEqual(run.herdr, []);
+	assert.match(cancelText(result), /cancelled from another device or by auto mode/);
+	assert.match(cancelText(result), /nothing was placed or run/);
+	assert.notEqual(text(result), resultText("cancel", toOffer("sudo apt upgrade", "shell")));
+	assert.deepEqual(result.details, { command: "! sudo apt upgrade", status: "cancel", cancelledFrom: "remote" });
+	assert.equal(result.terminate, false, "the agent answers");
+	assert.deepEqual(run.blocked(), [true, false]);
+	assert.equal(run.bus.listeners("robot-hand:answer"), 0);
+	assert.equal(run.bus.of("robot-hand:closed").length, 1);
+});
+
+test("a local Escape stays by cancel without an answerId and keeps the plain declined text", async () => {
+	const run = start(PARAMS);
+	run.state.pick(undefined);
+	const result = await run.done;
+	assert.deepEqual(run.bus.of("robot-hand:closed").map((closed) => Object.keys(closed).sort()), [["by", "id", "version"]]);
+	assert.equal(text(result), resultText("cancel", toOffer("sudo apt upgrade", "shell")));
+	assert.deepEqual(result.details, { command: "! sudo apt upgrade", status: "cancel" });
+});
+
+test("a cancel for a closed dialog is refused as closed, and an unknown id gets no result", async () => {
+	let release = () => {};
+	const gate = new Promise<void>((resolve) => (release = resolve));
+	const run = start(PARAMS, { copy: async () => gate });
+	const { id } = run.pending();
+	run.bus.emit("robot-hand:answer", { version: 1, id: "00000000-0000-4000-8000-000000000000", answerId: GOOD, cancel: true });
+	assert.deepEqual(run.bus.of("robot-hand:answer-result"), []);
+	run.pick(/clipboard/);
+	await flush();
+	run.bus.emit("robot-hand:answer", { version: 1, id, answerId: GOOD, cancel: true });
+	assert.deepEqual(run.bus.of("robot-hand:answer-result"), [{ version: 1, id, answerId: GOOD, accepted: false, reason: "closed" }]);
+	assert.deepEqual(run.bus.of("robot-hand:closed"), [{ version: 1, id, by: "local" }]);
+	release();
+	const result = await run.done;
+	assert.deepEqual(result.details, { command: "! sudo apt upgrade", status: "clipboard" });
+});
+
+test("after a remote cancel, a choice or a second cancel is refused as closed", async () => {
+	const run = start(PARAMS);
+	const { id } = run.pending();
+	run.bus.emit("robot-hand:answer", { version: 1, id, answerId: GOOD, cancel: true });
+	run.answer({ answerId: "another-answer-id-01", selections: [run.indexOf(/prompt/)] });
+	run.bus.emit("robot-hand:answer", { version: 1, id, answerId: "another-answer-id-02", cancel: true });
+	assert.deepEqual(run.bus.of("robot-hand:answer-result").map((result) => [result.accepted, result.reason]), [[true, undefined], [false, "closed"], [false, "closed"]]);
+	await run.done;
+	assert.equal(run.state.editor, "");
+	assert.equal(run.bus.of("robot-hand:closed").length, 1);
+});
+
+test("a cancel with a choice, a digest, or anything else is refused whole as malformed and the dialog stays open", async () => {
+	const run = start(PARAMS);
+	const { id, digest } = run.pending();
+	const base = { version: 1, id, answerId: GOOD, cancel: true };
+	const refused: Record<string, unknown>[] = [
+		{ ...base, selections: [0] },
+		{ ...base, text: "no" },
+		{ ...base, comment: "no" },
+		{ ...base, digest },
+		{ ...base, extra: true },
+		{ ...base, cancel: false },
+		{ ...base, cancel: "true" },
+		{ ...base, cancel: 1 },
+		{ ...base, version: 2 },
+		{ ...base, answerId: "short" },
+		{ ...base, answerId: undefined },
+	];
+	for (const payload of refused) run.bus.emit("robot-hand:answer", payload);
+	const results = run.bus.of("robot-hand:answer-result");
+	assert.equal(results.length, refused.length);
+	assert.ok(results.every((result) => result.accepted === false && result.reason === "malformed" && result.id === id));
+	assert.deepEqual(run.bus.of("robot-hand:closed"), []);
+	assert.equal(run.state.editor, "", "nothing was applied");
+	run.answer({ selections: [run.indexOf(/prompt/)] });
+	await run.done;
+	assert.equal(run.state.editor, "! sudo apt upgrade");
+	assert.deepEqual(run.bus.of("robot-hand:closed").map((closed) => closed.by), ["remote"]);
+});
+
+test("a cancel sent while pending is emitted wins before the selector opens", async () => {
+	const bus = makeBus();
+	let tool: ToolDefinition | undefined;
+	const state = { selects: 0 };
+	bus.on("robot-hand:pending", (data) => bus.emit("robot-hand:answer", { version: 1, id: (data as Pending).id, answerId: GOOD, cancel: true }));
+	createRobotHand(async () => {}, ENV, mkdtempSync(join(tmpdir(), "robot-hand-dialog-")), mkdtempSync(join(tmpdir(), "robot-hand-agent-")))({
+		registerTool: (definition: ToolDefinition) => (tool = definition),
+		events: bus,
+		on: () => {},
+		exec: async () => ({ stdout: "", code: 0, stderr: "", killed: false }),
+		sendMessage: () => {},
+	} as unknown as ExtensionAPI);
+	const ctx = {
+		hasUI: true,
+		mode: "tui",
+		cwd: "/repo",
+		ui: { getEditorText: () => "", setEditorText: () => {}, notify: () => {}, custom: async () => void state.selects++, select: async () => void state.selects++ },
+	} as unknown as ExtensionContext;
+	const result = await tool!.execute("call-1", PARAMS as never, undefined, undefined, ctx);
+	assert.equal(state.selects, 0);
+	assert.match(cancelText(result), /cancelled from another device or by auto mode/);
+	assert.deepEqual(bus.of("robot-hand:closed").map((closed) => closed.by), ["cancel"]);
 });
 
 test("a tool abort closes with abort and a later answer is refused", async () => {

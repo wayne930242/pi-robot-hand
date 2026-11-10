@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `robot_hand`: another extension can cancel the open dialog with `robot-hand:answer` `{ version: 1, id, answerId, cancel: true }` (no digest, no choice, no other key). The dialog closes without placing or running anything, `answer-result` is `accepted: true`, and `robot-hand:closed` is `{ version: 1, id, by: "cancel", answerId }`. The tool returns a result that says the dialog was cancelled from another device or by auto mode, not by the user (`details: { status: "cancel", cancelledFrom: "remote" }`); the agent's turn is not aborted. A cancel for a dialog that already closed gets `accepted: false, reason: "closed"`; one that carries a choice, a digest, or any other key is refused as `malformed` and the dialog stays open.
+- A remote cancel is told from a local Escape by its `answerId`: Escape (and "No, thanks" and "Report the mismatch and refuse") still closes with `by: "cancel"` and no `answerId`, and returns the plain declined text.
+- `robot-hand:pending` carries `cancellable: true`, so an answerer knows this version takes a cancel.
+
 ## 0.7.2
 
 - git hooks are matched to the git commands that run them, from a table of git's hooks, instead of a short list of commands: `reference-transaction` for any command that updates a ref (`branch`, `tag`, `fetch`, `reset`, `stash`, …), `post-index-change` for any command (`git add`, and `git status` when it refreshes the index), `post-checkout` for `clone`, `worktree`, and `bisect` too, `pre-auto-gc` for `gc` and `fetch`. A git command the scan does not know, and an alias whose values name none it knows, may run every hook. A `core.hooksPath` folder is listed from the top of the work tree and filtered the same way, so a husky repository's `git status` is not flagged; a folder the scan cannot list is still reported. Other files with a hook-like name are counted, never shown.

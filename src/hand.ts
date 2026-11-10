@@ -101,6 +101,10 @@ export function dialogTitle(offer: Offer, reason: string): string {
 	return `Robot Hand — ${reason}\n\n  ${promptText(offer).split("\n").join("\n  ")}`;
 }
 
+/** What the tool tells the agent when another extension cancelled the dialog: not the user's decision. */
+export const REMOTE_CANCEL_TEXT =
+	"The dialog was cancelled from another device or by auto mode, not by the user at the terminal; nothing was placed or run. This is not a refusal: the user has not decided. Do not ask again or wait for them now.";
+
 /** What the tool tells the agent after the user chose. */
 export function resultText(choice: Choice, offer: Offer): string {
 	if (choice === "prompt") {
