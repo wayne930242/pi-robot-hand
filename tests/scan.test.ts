@@ -595,6 +595,15 @@ test("git config is read as git does, with no user config: CRLF, continued lines
 			assert.match(kinds((await findScripts(command, folder(), never)).unread).join("\n"), /git config set at runtime/, command);
 		}
 		assert.deepEqual((await findScripts("git a", folder({ ".git/config": "[alias]\n\ta = b\n\tb = a\n" }), never)).unread, []);
+		// Single quotes, inline comments, the subsection form, and chains past the limit.
+		for (const config of ["[alias]\n\tci = 'com'mit\n", "[alias]\n\tci = commit;x\n", "[alias]\n\tci = commit#x\n", '[alias "ci"]\n\tcommand = commit\n']) {
+			assert.match(kinds((await findScripts("git ci -m x", hooked(config), never)).unread).join("\n"), /runs git hooks \(pre-commit\)/, config);
+		}
+		assert.match(kinds((await findScripts("git ci", folder({ ".git/config": '[alias "ci"]\n\tcommand = !./evil.sh\n' }), never)).unread).join("\n"), /git alias "ci"/);
+		// A hook verb counts as a word, not inside another word such as `name`.
+		assert.deepEqual((await findScripts("git lg", hooked("[alias]\n\tlg = log --name-only --stat\n"), never)).unread, []);
+		const chain = Array.from({ length: 40 }, (_, i) => `\ta${i + 1} = a${i + 2}\n`).join("");
+		assert.match(kinds((await findScripts("git a1", folder({ ".git/config": `[alias]\n${chain}\ta41 = commit\n` }), never)).unread).join("\n"), /chain of git aliases too long/);
 		// A backslash in a comment does not continue the line, and a lone CR does not end one: still found.
 		for (const config of ["[core]\n\ta = x ; c \\\n\thooksPath = ./h\n", "[x]\n# c \\\n[core]\n\thooksPath = ./h\n", "[core]\n\tfoo = 1\r[x]\n\thooksPath = ./h\n"]) {
 			assert.match(kinds((await findScripts("git commit -m x", folder({ ".git/config": config }), never)).unread).join("\n"), /from core\.hooksPath/, JSON.stringify(config));

@@ -1219,24 +1219,32 @@ class Scanner {
 		}
 		// Every value an alias may have, not the one git would pick, through chains of aliases, from `-c` and the
 		// config files: the scan reads the config two ways and does not unquote as git does, so any candidate counts.
-		const lookup = (name: string): string[] => [
-			...settings.filter((setting) => setting.toLowerCase().startsWith(`alias.${name.toLowerCase()}=`)).map((setting) => setting.slice(setting.indexOf("=") + 1)),
-			...(configs === undefined ? [] : gitAliases(configs, name)),
-		];
-		const verbs = [verb];
+		// git's own splitting (quotes, escapes, comments) is not reproduced: every word of a value may name the next
+		// alias, and a value that mentions a hook verb anywhere counts as running it.
+		const lookup = (name: string): string[] => {
+			const lower = name.toLowerCase();
+			const fromLine = settings
+				.filter((setting) => setting.toLowerCase().startsWith(`alias.${lower}=`) || setting.toLowerCase().startsWith(`alias.${lower}.command=`))
+				.map((setting) => setting.slice(setting.indexOf("=") + 1));
+			return [...fromLine, ...(configs === undefined ? [] : gitAliases(configs, name))];
+		};
+		const names = [verb];
 		const values: string[] = [];
-		for (let i = 0; i < verbs.length && i < 16; i++) {
-			for (const value of lookup(verbs[i] ?? "")) {
+		for (let i = 0; i < names.length; i++) {
+			if (i >= MAX_ALIASES) {
+				this.note("indirect", line, "follows a chain of git aliases too long for the check to read");
+				return;
+			}
+			for (const value of lookup(names[i] ?? "")) {
 				values.push(value);
-				const next = value.replace(/["\\]/g, "").trim().split(/\s+/)[0] ?? "";
-				if (next && !verbs.includes(next)) verbs.push(next);
+				for (const word of value.replace(/["'\\]/g, "").split(/[^\w.-]+/)) if (word && !names.includes(word)) names.push(word);
 			}
 		}
 		if (values.some((value) => value.includes("!"))) {
 			this.note("indirect", line, `runs the git alias ${JSON.stringify(verb)}, which runs a shell command the check does not read`);
 			return;
 		}
-		const effective = verbs.find((each) => HOOK_VERBS.has(each));
+		const effective = HOOK_VERBS.has(verb) ? verb : [...HOOK_VERBS].find((hook) => values.some((value) => new RegExp(`(^|[^a-z-])${hook}($|[^a-z-])`).test(value.replace(/["'\\]/g, ""))));
 		if (effective === undefined) return;
 		if (settings.some((setting) => /^core\.hookspath=/i.test(setting))) {
 			this.note("indirect", line, "runs git hooks from a folder set on the command line, which the check does not read");
@@ -1546,26 +1554,41 @@ function gitIncludes(config: string): string[] {
  * Whether a trailing backslash continues a line depends on quotes and comments; rather than decide, the text is
  * read both ways and the entries of both kept, so a setting either reading finds is reported.
  */
-function gitEntries(config: string): { section: string; key: string; value: string }[] {
+function gitEntries(config: string): GitEntry[] {
 	const text = config.replace(/\r\n/g, "\n");
 	const joined = text.replace(/(?<!\\)((?:\\\\)*)\\\n/g, "$1");
 	return joined === text ? gitLines(text) : [...gitLines(text), ...gitLines(joined)];
 }
 
-function gitLines(text: string): { section: string; key: string; value: string }[] {
-	const entries: { section: string; key: string; value: string }[] = [];
+function gitLines(text: string): GitEntry[] {
+	const entries: GitEntry[] = [];
 	let section = "";
+	let sub = "";
 	for (const line of text.split("\n")) {
-		const header = /^\s*\[\s*([^\]\s"]+)(?:\s+"(?:[^"\\\n]|\\.)*")?\s*\]/.exec(line);
-		if (header) section = (header[1] ?? "").split(".")[0]?.toLowerCase() ?? "";
+		const header = /^\s*\[\s*([^\]\s"]+)(?:\s+"((?:[^"\\\n]|\\.)*)")?\s*\]/.exec(line);
+		if (header) {
+			const [name = "", ...rest] = (header[1] ?? "").split(".");
+			section = name.toLowerCase();
+			sub = header[2]?.replace(/\\(.)/g, "$1") ?? rest.join(".");
+		}
 		const entry = /^\s*([\w-]+)\s*=\s*(.*)$/.exec(header ? line.slice(header[0].length) : line);
-		if (entry) entries.push({ section, key: (entry[1] ?? "").toLowerCase(), value: (entry[2] ?? "").trim().replace(/^"(.*)"$/, "$1") });
+		if (entry) entries.push({ section, sub, key: (entry[1] ?? "").toLowerCase(), value: (entry[2] ?? "").trim().replace(/^"(.*)"$/, "$1") });
 	}
 	return entries;
 }
 
+/** One git config entry: `[section "sub"] key = value`. */
+interface GitEntry {
+	section: string;
+	sub: string;
+	key: string;
+	value: string;
+}
+
 // `-c` settings that make git run a command.
 const COMMAND_SETTING = /^(credential\.(?:[^=]*\.)?helper=\s*!|core\.fsmonitor=(?!\s*(?:true|false|yes|no|on|off|0|1)?\s*$)|core\.sshcommand=|filter\.[^=]*\.(?:smudge|clean|process)=|diff\.[^=]*\.textconv=|merge\.[^=]*\.driver=)/i;
+// git aliases followed from one command, through chains; past this the command is reported.
+const MAX_ALIASES = 32;
 // git commands that talk to a remote, which use credential helpers and the ssh command.
 const NETWORK_VERBS = new Set(["fetch", "pull", "push", "clone", "ls-remote", "remote", "submodule"]);
 
@@ -1592,7 +1615,10 @@ function gitCommands(configs: readonly string[], network: boolean): string[] {
 function gitAliases(configs: readonly string[], name: string): string[] {
 	const found: string[] = [];
 	for (const config of configs) {
-		for (const { section, key, value } of gitEntries(config)) if (section === "alias" && key === name.toLowerCase()) found.push(value);
+		for (const { section, sub, key, value } of gitEntries(config)) {
+			// `alias.<name>`, or `[alias "<name>"] command = …`.
+			if (section === "alias" && ((sub === "" && key === name.toLowerCase()) || (sub.toLowerCase() === name.toLowerCase() && key === "command"))) found.push(value);
+		}
 	}
 	return found;
 }
