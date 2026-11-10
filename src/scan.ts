@@ -1689,7 +1689,7 @@ interface GitEntry {
 }
 
 // git command options that take the next word as a value, such as a commit message.
-const VALUE_FLAGS = new Set(["-m", "--message", "-F", "--file", "-C", "-c", "--reuse-message", "--reedit-message", "-t", "--template", "--author", "--date", "--cleanup", "--fixup", "--squash", "-S", "--trailer", "-o", "--push-option", "--exec", "-x", "-s", "--strategy", "-X", "--strategy-option", "--onto"]);
+const VALUE_FLAGS = new Set(["-m", "--message", "-F", "--file", "-C", "-c", "--reuse-message", "--reedit-message", "-t", "--template", "--author", "--date", "--cleanup", "--fixup", "--squash", "--trailer", "-o", "--push-option", "--exec", "-x", "--strategy", "-X", "--strategy-option", "--onto"]);
 // `-c` settings that make git run a command.
 const COMMAND_SETTING = /^(hook\.[^=]*\.command=|credential\.(?:[^=]*\.)?helper=\s*!|core\.fsmonitor=(?!\s*(?:true|false|yes|no|on|off|0|1)?\s*$)|core\.sshcommand=|filter\.[^=]*\.(?:smudge|clean|process)=|diff\.[^=]*\.textconv=|merge\.[^=]*\.driver=)/i;
 // git commands that talk to a remote, which use credential helpers and the ssh command.
