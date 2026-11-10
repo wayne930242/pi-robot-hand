@@ -577,6 +577,13 @@ test("git config is read as git does, with no user config: CRLF, continued lines
 		assert.match(kinds((await findScripts("git status", crlf, never)).unread).join("\n"), /\(filter clean\)/);
 		const continued = folder({ ".git/config": "[core]\n\ta = x \\\n[x]\n\thooksPath = ./h2\n" });
 		assert.match(kinds((await findScripts("git commit -m x", continued, never)).unread).join("\n"), /from core\.hooksPath/);
+		// An alias is judged by every value either reading finds, not the last one, which a reading may get wrong.
+		for (const config of ["[alias]\n\tst = status\n\t; note \\\n\tst = !./evil.sh\n", "[alias]\n\tst = status\n\t# note \\\n\tst = !./evil.sh\n", '[alias]\n\t; c \\\n\tst = !./evil.sh\n\tx = "a \\\n\tst = status"\n']) {
+			assert.match(kinds((await findScripts("git st", folder({ ".git/config": config }), never)).unread).join("\n"), /git alias "st"/, JSON.stringify(config));
+		}
+		const hookAlias = folder({ ".git/config": "[alias]\n\tci = status\n\t; c \\\n\tci = commit\n[core]\n\tbare = false\n", ".git/hooks/pre-commit": "#!/bin/sh\n" });
+		assert.match(kinds((await findScripts("git ci -m x", hookAlias, never)).unread).join("\n"), /runs git hooks \(pre-commit\)/);
+		assert.deepEqual((await findScripts("git st", folder({ ".git/config": "[alias]\n\tst = status\n" }), never)).unread, []);
 		// A backslash in a comment does not continue the line, and a lone CR does not end one: still found.
 		for (const config of ["[core]\n\ta = x ; c \\\n\thooksPath = ./h\n", "[x]\n# c \\\n[core]\n\thooksPath = ./h\n", "[core]\n\tfoo = 1\r[x]\n\thooksPath = ./h\n"]) {
 			assert.match(kinds((await findScripts("git commit -m x", folder({ ".git/config": config }), never)).unread).join("\n"), /from core\.hooksPath/, JSON.stringify(config));

@@ -1211,13 +1211,15 @@ class Scanner {
 		for (const setting of configs === undefined ? [] : gitCommands(configs, NETWORK_VERBS.has(verb))) {
 			this.note("indirect", line, `runs a command git config sets (${setting}), which the check does not read`);
 		}
-		const alias = configs === undefined ? undefined : gitAlias(configs, verb);
-		if (alias?.startsWith("!")) {
+		// Every value the alias may have, not the one git would pick: the scan reads the config two ways, and a
+		// value either finds counts.
+		const aliases = configs === undefined ? [] : gitAliases(configs, verb);
+		if (aliases.some((alias) => alias.startsWith("!"))) {
 			this.note("indirect", line, `runs the git alias ${JSON.stringify(verb)}, which runs a shell command the check does not read`);
 			return;
 		}
-		const effective = alias?.split(/\s+/)[0] ?? verb;
-		if (!HOOK_VERBS.has(effective)) return;
+		const effective = [verb, ...aliases.map((alias) => alias.split(/\s+/)[0] ?? "")].find((each) => HOOK_VERBS.has(each));
+		if (effective === undefined) return;
 		if (settings.some((setting) => /^core\.hookspath=/i.test(setting))) {
 			this.note("indirect", line, "runs git hooks from a folder set on the command line, which the check does not read");
 			return;
@@ -1568,11 +1570,11 @@ function gitCommands(configs: readonly string[], network: boolean): string[] {
 	return [...found];
 }
 
-/** The value of `alias.<name>` in git config texts, the last one winning, or undefined. */
-function gitAlias(configs: readonly string[], name: string): string | undefined {
-	let found: string | undefined;
+/** Every value of `alias.<name>` in git config texts, in either reading of each. */
+function gitAliases(configs: readonly string[], name: string): string[] {
+	const found: string[] = [];
 	for (const config of configs) {
-		for (const { section, key, value } of gitEntries(config)) if (section === "alias" && key === name.toLowerCase()) found = value;
+		for (const { section, key, value } of gitEntries(config)) if (section === "alias" && key === name.toLowerCase()) found.push(value);
 	}
 	return found;
 }
