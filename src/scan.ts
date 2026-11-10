@@ -102,16 +102,17 @@ const HOOK_TRIGGERS = new Map<string, readonly string[] | "any">([
 	["pre-applypatch", ["am"]],
 	["post-applypatch", ["am"]],
 	["pre-commit", COMMIT_VERBS],
-	["pre-merge-commit", COMMIT_VERBS],
+	["pre-merge-commit", ["merge", "pull"]],
 	["prepare-commit-msg", COMMIT_VERBS],
 	["commit-msg", COMMIT_VERBS],
 	["post-commit", COMMIT_VERBS],
 	["post-rewrite", ["commit", "rebase", "am", "pull"]],
 	["pre-rebase", ["rebase", "pull"]],
-	["post-checkout", ["checkout", "switch", "clone", "worktree", "rebase", "pull", "bisect", "submodule"]],
+	["post-checkout", ["checkout", "switch", "restore", "clone", "worktree", "rebase", "pull", "bisect", "submodule", "stash"]],
 	["post-merge", ["merge", "pull"]],
 	["pre-push", ["push"]],
-	["reference-transaction", [...COMMIT_VERBS, "fetch", "push", "branch", "tag", "update-ref", "reset", "checkout", "switch", "clone", "worktree", "remote", "replace", "notes", "symbolic-ref", "bisect", "stash", "pack-refs", "gc", "maintenance", "reflog", "filter-branch", "fast-import", "submodule"]],
+	// The receiving repository's hooks: a push to `.` or to a path runs them, and the scan sees only this repository.
+	["reference-transaction", [...COMMIT_VERBS, "fetch", "push", "branch", "tag", "update-ref", "reset", "checkout", "switch", "clone", "init", "worktree", "remote", "replace", "notes", "symbolic-ref", "bisect", "stash", "pack-refs", "gc", "maintenance", "reflog", "filter-branch", "fast-import", "submodule"]],
 	["pre-auto-gc", [...COMMIT_VERBS, "fetch", "gc", "maintenance", "receive-pack"]],
 	["post-index-change", "any"],
 	["fsmonitor-watchman", "any"],
@@ -120,7 +121,7 @@ const HOOK_TRIGGERS = new Map<string, readonly string[] | "any">([
 	["p4-prepare-changelist", ["p4"]],
 	["p4-post-changelist", ["p4"]],
 	["p4-pre-submit", ["p4"]],
-	...["pre-receive", "update", "proc-receive", "post-receive", "post-update", "push-to-checkout"].map((hook) => [hook, ["receive-pack"]] as const),
+	...["pre-receive", "update", "proc-receive", "post-receive", "post-update", "push-to-checkout"].map((hook) => [hook, ["push", "receive-pack"]] as const),
 ]);
 // git commands that run no hook of their own, only the "any" ones. A command neither here nor in HOOK_TRIGGERS may run
 // every hook.
@@ -129,7 +130,7 @@ const QUIET_VERBS = new Set([
 	"describe", "shortlog", "help", "version", "show-ref", "for-each-ref", "name-rev", "whatchanged", "var", "check-ignore",
 	"check-attr", "check-ref-format", "merge-base", "cherry", "range-diff", "format-patch", "config", "show-branch",
 	"count-objects", "verify-commit", "verify-tag", "diff-files", "diff-index", "diff-tree", "archive", "add", "rm", "mv",
-	"restore", "apply", "update-index", "read-tree", "write-tree", "hash-object", "mktree", "clean", "fsck", "init",
+	"apply", "update-index", "read-tree", "write-tree", "hash-object", "mktree", "clean", "fsck",
 ]);
 const KNOWN_VERBS = new Set([...QUIET_VERBS, ...[...HOOK_TRIGGERS.values()].flatMap((verbs) => (verbs === "any" ? [] : verbs))]);
 // How a known verb is found in an alias value: a short one as a word (`am` would match inside `name`), a long one in
@@ -694,6 +695,7 @@ class Scanner {
 	// The text of each file read, as read, for a later `source` of the same file.
 	private readonly texts = new Map<string, string>();
 	private readonly reported = new Set<string>();
+	private readonly configCache = new Map<string, Promise<GitConfig[]>>();
 	private readonly queue: { text: string; where: Where }[] = [];
 	private readonly top: string;
 	private readonly isSecret: (canonical: string) => boolean;
@@ -1236,12 +1238,24 @@ class Scanner {
 	 * git commands that run hooks, and aliases that run a shell command: reported when the repository or the user's
 	 * git config sets them up. Config files are matched here and never sent: they can hold credentials in URLs.
 	 */
+	/** The git config that applies in `dir`, read once per folder for the whole scan. */
+	private gitConfigs(dir: string): Promise<GitConfig[]> {
+		let found = this.configCache.get(dir);
+		if (found === undefined) {
+			found = gitConfigs(dir);
+			this.configCache.set(dir, found);
+		}
+		return found;
+	}
+
 	private async git(args: string[], assigns: string[], line: string, where: Where): Promise<void> {
 		let dir = where.cwd;
 		let verb: string | undefined;
 		const settings: string[] = [];
 		// Config the scan cannot see: `--config-env` and the GIT_CONFIG_* variables.
 		let hidden = assigns.some((assign) => /^GIT_CONFIG(_\w+)?=/.test(assign));
+		// A work tree set elsewhere moves where a relative core.hooksPath points.
+		let movedTree = assigns.some((assign) => /^GIT_WORK_TREE=/.test(assign));
 		for (let i = 0; i < args.length && verb === undefined; i++) {
 			const arg = args[i] ?? "";
 			if (arg === "-C") dir = changeDir(dir, args[++i]);
@@ -1252,16 +1266,19 @@ class Scanner {
 			}
 			else if (arg === "--git-dir" || arg === "--work-tree" || arg === "--namespace" || arg === "--exec-path") {
 				if (arg === "--git-dir" || arg === "--exec-path") dir = undefined;
+				if (arg === "--work-tree") movedTree = true;
 				i++;
 			} else if (arg.startsWith("--git-dir=") || arg.startsWith("--exec-path=")) dir = undefined;
+			else if (arg.startsWith("--work-tree=")) movedTree = true;
 			else if (!arg.startsWith("-")) verb = arg;
 		}
 		if (assigns.some((assign) => /^(GIT_DIR|GIT_COMMON_DIR|GIT_CONFIG\w*|GIT_EXEC_PATH)=/.test(assign))) dir = undefined;
 		if (verb === undefined) return;
 		if (hidden) this.note("indirect", line, "takes git config set at runtime (GIT_CONFIG_* or --config-env), which may run commands the check does not read");
 		if (settings.some((setting) => COMMAND_SETTING.test(setting))) this.note("indirect", line, "sets git config on the command line that runs a command, which the check does not read");
-		const configs = await gitConfigs(dir);
-		for (const setting of configs === undefined ? [] : gitCommands(configs, NETWORK_VERBS.has(verb))) {
+		const scoped = dir === undefined ? undefined : await this.gitConfigs(dir);
+		const configs = scoped?.map(({ text }) => text);
+		for (const setting of scoped === undefined ? [] : gitCommands(scoped, NETWORK_VERBS.has(verb))) {
 			this.note("indirect", line, `runs a command git config sets (${setting}), which the check does not read`);
 		}
 		// Which alias git would run, and through which others, is not worked out: git splits and unquotes values in ways
@@ -1295,6 +1312,9 @@ class Scanner {
 			}
 		} else if (KNOWN_VERBS.has(verb)) verbs.add(verb);
 		else unknown = true;
+		// clone and init copy hooks from a template folder and run them in the new repository.
+		const template = args.some((arg) => arg === "--template" || arg.startsWith("--template=")) || assigns.some((assign) => /^GIT_TEMPLATE_DIR=/.test(assign)) || settings.some((setting) => /^init\.templatedir=/i.test(setting)) || (configs ?? []).some((config) => gitEntries(config).some(({ section, key }) => section === "init" && key === "templatedir"));
+		if ((verbs.has("clone") || verbs.has("init")) && template) this.note("indirect", line, "may run git hooks from a template folder, which the check does not read");
 		// Only hooks any command may run: a repository or hooks folder the scan cannot see is not reported for these.
 		const quiet = !unknown && [...verbs].every((each) => QUIET_VERBS.has(each));
 		if (settings.some((setting) => /^core\.hookspath=/i.test(setting))) {
@@ -1305,18 +1325,26 @@ class Scanner {
 			if (!quiet) this.note("indirect", line, "may run git hooks of a repository set at runtime, which the check does not read");
 			return;
 		}
-		const present = new Set((await gitHooks(dir)) ?? []);
-		// A hooks folder from core.hooksPath is listed; one the scan cannot list is reported whole.
+		// Hook names are matched in lower case: on a file system that ignores case, git runs `PRE-COMMIT` too.
+		const present = new Set(((await gitHooks(dir)) ?? []).map((hook) => hook.toLowerCase()));
+		// A hooks folder from core.hooksPath is listed; one the scan cannot place or list is reported whole.
 		const paths = configs.flatMap((config) => gitEntries(config).filter(({ section, key }) => section === "core" && key === "hookspath").map(({ value }) => value));
+		const treeSet = movedTree || settings.some((setting) => /^core\.worktree=/i.test(setting)) || configs.some((config) => gitEntries(config).some(({ section, key }) => section === "core" && key === "worktree"));
 		let unlisted = false;
 		for (const path of paths) {
-			const listed = await hookFolder(dir, path);
+			const listed = treeSet && !isAbsolute(expandHome(path)) ? undefined : await hookFolder(dir, path);
 			if (listed === undefined || listed.length === 0) unlisted = true;
-			for (const hook of listed ?? []) present.add(hook);
+			for (const hook of listed ?? []) present.add(hook.toLowerCase());
 		}
-		// `--no-verify` skips the hooks that could stop the command, for every command; `-n` only for commit.
+		// What the command's own options say, with option values (`-m -n`) not taken for options.
+		const flags = new Set<string>();
+		for (let i = 0; i < args.length; i++) {
+			const arg = args[i] ?? "";
+			if (VALUE_FLAGS.has(arg)) i++;
+			else flags.add(arg);
+		}
 		const runs = (hook: string, each: string | undefined): boolean => {
-			if (NO_VERIFY_HOOKS.has(hook) && (args.includes("--no-verify") || (each === "commit" && args.includes("-n")))) return false;
+			if (each !== undefined && NO_VERIFY_HOOKS.get(each)?.has(hook) && (flags.has("--no-verify") || (each === "commit" && flags.has("-n")))) return false;
 			const triggers = HOOK_TRIGGERS.get(hook);
 			if (each === undefined) return true;
 			if (triggers === undefined) return !QUIET_VERBS.has(each);
@@ -1563,7 +1591,15 @@ async function findMakefile(dir: string): Promise<string | undefined> {
 	return found === undefined ? undefined : realpath(found).catch(() => found);
 }
 
-const NO_VERIFY_HOOKS = new Set(["pre-commit", "commit-msg", "pre-merge-commit", "pre-push", "pre-rebase", "pre-applypatch", "applypatch-msg"]);
+// The hooks `--no-verify` skips, by git command (`-n` too, for commit); pull still runs pre-rebase.
+const NO_VERIFY_HOOKS = new Map<string, ReadonlySet<string>>([
+	["commit", new Set(["pre-commit", "commit-msg"])],
+	["merge", new Set(["pre-merge-commit", "commit-msg"])],
+	["pull", new Set(["pre-merge-commit", "commit-msg"])],
+	["am", new Set(["pre-applypatch", "applypatch-msg"])],
+	["push", new Set(["pre-push"])],
+	["rebase", new Set(["pre-rebase"])],
+]);
 
 /** The git folder (shared by worktrees) of the repository holding `dir`, or undefined outside one. */
 async function gitDir(dir: string): Promise<string | undefined> {
@@ -1589,20 +1625,19 @@ async function gitDir(dir: string): Promise<string | undefined> {
  * The texts of the git config files that apply in `dir` (system, user, repository, worktree), for matching only;
  * undefined when `dir` is unknown. A file another one includes is not followed.
  */
-async function gitConfigs(dir: string | undefined): Promise<string[] | undefined> {
-	if (dir === undefined) return undefined;
+async function gitConfigs(dir: string): Promise<GitConfig[]> {
 	const repo = await gitDir(dir);
 	const xdg = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-	const paths = ["/etc/gitconfig", join(homedir(), ".gitconfig"), join(xdg, "git", "config"), ...(repo ? [join(repo, "config"), join(repo, "config.worktree")] : [])];
-	const texts: string[] = [];
-	for (const path of paths) {
+	const paths: [string, boolean][] = [["/etc/gitconfig", false], [join(homedir(), ".gitconfig"), false], [join(xdg, "git", "config"), false], ...(repo ? ([[join(repo, "config"), true], [join(repo, "config.worktree"), true]] as [string, boolean][]) : [])];
+	const texts: GitConfig[] = [];
+	for (const [path, own] of paths) {
 		const file = await readText(path, 64_000);
 		if (file.kind !== "text") continue;
-		texts.push(file.head);
+		texts.push({ text: file.head, repo: own });
 		// `[include]` and `[includeIf …]` files, one level deep: they can set hooks and aliases too.
 		for (const include of gitIncludes(file.head).slice(0, 8)) {
 			const included = await readText(resolve(dirname(path), expandHome(include)), 64_000);
-			if (included.kind === "text") texts.push(included.head);
+			if (included.kind === "text") texts.push({ text: included.head, repo: own });
 		}
 	}
 	return texts;
@@ -1653,8 +1688,10 @@ interface GitEntry {
 	value: string;
 }
 
+// git command options that take the next word as a value, such as a commit message.
+const VALUE_FLAGS = new Set(["-m", "--message", "-F", "--file", "-C", "-c", "--reuse-message", "--reedit-message", "-t", "--template", "--author", "--date", "--cleanup", "--fixup", "--squash", "-S", "--trailer", "-o", "--push-option", "--exec", "-x", "-s", "--strategy", "-X", "--strategy-option", "--onto"]);
 // `-c` settings that make git run a command.
-const COMMAND_SETTING = /^(credential\.(?:[^=]*\.)?helper=\s*!|core\.fsmonitor=(?!\s*(?:true|false|yes|no|on|off|0|1)?\s*$)|core\.sshcommand=|filter\.[^=]*\.(?:smudge|clean|process)=|diff\.[^=]*\.textconv=|merge\.[^=]*\.driver=)/i;
+const COMMAND_SETTING = /^(hook\.[^=]*\.command=|credential\.(?:[^=]*\.)?helper=\s*!|core\.fsmonitor=(?!\s*(?:true|false|yes|no|on|off|0|1)?\s*$)|core\.sshcommand=|filter\.[^=]*\.(?:smudge|clean|process)=|diff\.[^=]*\.textconv=|merge\.[^=]*\.driver=)/i;
 // git commands that talk to a remote, which use credential helpers and the ssh command.
 const NETWORK_VERBS = new Set(["fetch", "pull", "push", "clone", "ls-remote", "remote", "submodule"]);
 
@@ -1663,18 +1700,36 @@ const NETWORK_VERBS = new Set(["fetch", "pull", "push", "clone", "ls-remote", "r
  * (for commands that talk to a remote), `core.fsmonitor` set to a program, and filter, diff, and merge drivers.
  * git-lfs's filter and a plain `ssh …` command are left out, as programs judged by their names.
  */
-function gitCommands(configs: readonly string[], network: boolean): string[] {
+function gitCommands(configs: readonly GitConfig[], network: boolean): string[] {
 	const found = new Set<string>();
-	for (const config of configs) {
-		for (const { section, key, value } of gitEntries(config)) {
+	for (const { text, repo } of configs) {
+		for (const { section, key, value } of gitEntries(text)) {
 			if (network && section === "credential" && key === "helper" && value.startsWith("!")) found.add("credential.helper");
 			else if (network && section === "core" && key === "sshcommand" && !/^ssh(\s|$)/.test(value)) found.add("core.sshCommand");
 			else if (section === "core" && key === "fsmonitor" && !/^(true|false|yes|no|on|off|0|1)?$/i.test(value)) found.add("core.fsmonitor");
 			else if (section === "filter" && ["smudge", "clean", "process"].includes(key) && !/^git-lfs (clean|smudge|filter-process)( -- %f)?$/.test(value)) found.add(`filter ${key}`);
 			else if ((section === "diff" && key === "textconv") || (section === "merge" && key === "driver")) found.add(`${section}.${key}`);
+			// Hooks set in config: `[hook "name"] command = …`, run for its `event`.
+			else if (section === "hook" && key === "command") found.add("hook.<name>.command");
+			// Programs git starts that a user sets for themselves; from the repository's own config they are someone
+			// else's code. A credential helper there with a path is one too.
+			else if (repo && REPO_PROGRAMS.some(([want, wantKey]) => section === want && key === wantKey)) found.add(`${section}.${key}`);
+			else if (network && repo && section === "credential" && key === "helper" && /[/\\]/.test(value)) found.add("credential.helper");
 		}
 	}
 	return [...found];
+}
+
+// Settings that name a program git runs, reported from a repository's config.
+const REPO_PROGRAMS: readonly (readonly [string, string])[] = [
+	["core", "pager"], ["pager", "log"], ["pager", "diff"], ["pager", "show"], ["pager", "branch"], ["pager", "status"], ["core", "editor"], ["sequence", "editor"],
+	["core", "askpass"], ["gpg", "program"], ["difftool", "cmd"], ["mergetool", "cmd"], ["interactive", "difffilter"], ["sendemail", "smtpserver"],
+];
+
+/** A git config text, and whether it is the repository's own (or a file it includes) rather than the user's or system's. */
+interface GitConfig {
+	text: string;
+	repo: boolean;
 }
 
 /** Every alias in git config texts, in either reading of each: `alias.<name>`, or `[alias "<name>"] command = …`. */
@@ -1694,7 +1749,7 @@ function gitAliases(configs: readonly string[]): { name: string; value: string }
 async function gitHooks(dir: string): Promise<string[] | undefined> {
 	const repo = await gitDir(dir);
 	if (repo === undefined) return undefined;
-	return (await readdir(join(repo, "hooks")).catch(() => [] as string[])).filter((name) => !name.endsWith(".sample")).sort();
+	return (await readdir(join(repo, "hooks")).catch(() => [] as string[])).filter((name) => !name.toLowerCase().endsWith(".sample")).sort();
 }
 
 /**
@@ -1710,11 +1765,13 @@ async function hookFolder(dir: string, path: string): Promise<string[] | undefin
 		}
 		if (dirname(at) === at) break;
 	}
-	const expanded = expandHome(path.trim());
+	// git expands `:(optional)`, `%(prefix)`, `~user`, and escapes; the scan does not, so such a value is not listed.
+	if (/^:\(|^%\(|^~[^/]|["\\]/.test(path)) return undefined;
+	const expanded = expandHome(path);
 	const folder = isAbsolute(expanded) ? expanded : top === undefined ? undefined : resolve(top, expanded);
 	if (folder === undefined) return undefined;
 	const names = await readdir(folder).catch(() => undefined);
-	return names?.filter((name) => !name.endsWith(".sample"));
+	return names?.filter((name) => !name.toLowerCase().endsWith(".sample"));
 }
 
 function isShellScript(path: string, text: string): boolean {

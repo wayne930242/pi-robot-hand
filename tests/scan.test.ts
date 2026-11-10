@@ -680,6 +680,31 @@ test("git hooks by the commands that run them: ref updates, index writes, checko
 		assert.match(await notes("git ci -n -m x", mixed), /runs git hooks \(post-commit\)/);
 		const merging = hooks(["pre-commit", "post-commit", "pre-merge-commit"], "[alias]\n\tci = commit\n\tmg = merge\n");
 		assert.match(await notes("git mg -n feat", merging), /pre-merge-commit/);
+		// Review of the table: a push runs the receiving repository's hooks; restore runs post-checkout; a hook name in
+		// another case runs on a case-insensitive file system; pull --rebase --no-verify still runs pre-rebase; a
+		// message is not an option.
+		assert.match(await notes("git push . HEAD:x", hooks(["post-receive"])), /post-receive/);
+		assert.match(await notes("git restore a", hooks(["post-checkout"])), /post-checkout/);
+		assert.match(await notes("git add a", hooks(["POST-INDEX-CHANGE"])), /runs git hooks \(post-index-change\)/);
+		assert.match(await notes("git pull --rebase --no-verify", hooks(["pre-rebase"])), /pre-rebase/);
+		assert.match(await notes("git commit -m -n", hooks(["pre-commit"])), /pre-commit/);
+		assert.equal(await notes("git commit -n -m x", hooks(["pre-merge-commit"])), "");
+		// A relative core.hooksPath the scan cannot place is reported whole, not listed from a decoy folder.
+		const decoy = (config: string) => folder({ ".git/config": `[core]\n${config}`, "h/README": "", ":(optional)h/README": "" });
+		for (const [config, command] of [["\thooksPath = h\n\tworktree = ../wt\n", "git commit -m x"], ["\thooksPath = h\n", "GIT_WORK_TREE=../wt git commit -m x"], ["\thooksPath = h\n", "git --work-tree=../wt commit -m x"], ['\thooksPath = ":(optional)h"\n', "git commit -m x"]]) {
+			assert.match(await notes(command ?? "", decoy(config ?? "")), /from core\.hooksPath/, `${config} / ${command}`);
+		}
+		// A quoted value keeps its spaces, as git reads it.
+		assert.match(await notes("git commit -m x", folder({ ".git/config": '[core]\n\thooksPath = " h"\n', "h/README": "", " h/pre-commit": "#!/bin/sh\n" })), /runs git hooks \(pre-commit\)/);
+		// Hooks set in config, and programs a repository's own config names; the user's own are not reported.
+		assert.match(await notes("git commit -m x", folder({ ".git/config": '[hook "x"]\n\tevent = pre-commit\n\tcommand = ./evil.sh\n' })), /hook\.<name>\.command/);
+		assert.match(await notes("git log", folder({ ".git/config": "[core]\n\tpager = ./evil.sh\n" })), /core\.pager/);
+		writeFileSync(join(home, ".gitconfig"), "[core]\n\tpager = delta\n\teditor = vim\n");
+		assert.equal(await notes("git log", folder({ ".git/config": "" })), "");
+		writeFileSync(join(home, ".gitconfig"), "[init]\n\ttemplateDir = ~/tpl\n");
+		assert.match(await notes("git clone https://x/r", folder()), /template folder/);
+		assert.equal(await notes("git status", folder({ ".git/config": "" })), "");
+		writeFileSync(join(home, ".gitconfig"), "");
 	} finally {
 		for (const [key, value] of Object.entries(saved)) {
 			if (value === undefined) delete process.env[key];
