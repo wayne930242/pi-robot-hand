@@ -8,6 +8,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, userInfo } from "node:os";
 import { delimiter, join } from "node:path";
 import { shellQuote } from "../lib/shell.ts";
 
@@ -62,6 +63,39 @@ export function wrapperScript(shell: "zsh" | "bash", dir: string, token: string,
 	].join("\n");
 }
 
+/** Variables a fixed-environment run takes over from pi when set: locale, the ssh agent and the user's runtime dir. */
+export const FIXED_ENV_PASS = ["LANG", "LC_ALL", "SSH_AUTH_SOCK", "XDG_RUNTIME_DIR"] as const;
+
+/** The default PATH of a fixed-environment run: system and per-user profiles, never a writable home directory. */
+export function fixedEnvPath(user: string): string {
+	return ["/run/current-system/sw/bin", `/etc/profiles/per-user/${user}/bin`, "/usr/bin", "/bin"].join(delimiter);
+}
+
+/**
+ * The line typed into the pane for a run another extension answered: it replaces the pane's shell with a bash that
+ * reads no startup file (`--noprofile --norc`, no `BASH_ENV`/`ENV`, `INPUTRC=/dev/null` for the line editor) and
+ * inherits nothing but a fixed list, so code the agent could have placed in the user's environment does not run with
+ * the approved command. Python's user site and git's fsmonitor stay off, because both run code from writable files.
+ */
+export function fixedEnvLine(script: string, env: NodeJS.ProcessEnv = process.env, user = userInfo().username, home = homedir()): string {
+	const vars: Record<string, string> = {
+		PATH: env.PI_ROBOT_HAND_FIXED_PATH || fixedEnvPath(user),
+		HOME: home,
+		USER: user,
+		LOGNAME: user,
+		TERM: env.TERM || "xterm-256color",
+		INPUTRC: "/dev/null",
+		PYTHONNOUSERSITE: "1",
+		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_CONFIG_COUNT: "1",
+		GIT_CONFIG_KEY_0: "core.fsmonitor",
+		GIT_CONFIG_VALUE_0: "false",
+	};
+	for (const name of FIXED_ENV_PASS) if (env[name]) vars[name] = env[name] as string;
+	const assignments = Object.entries(vars).map(([name, value]) => shellQuote(`${name}=${value}`));
+	return ["exec", "/usr/bin/env", "-i", ...assignments, "bash", "--noprofile", "--norc", shellQuote(script)].join(" ");
+}
+
 /** The command's output between the run's markers, trimmed to what the model needs. */
 export function sliceOutput(screen: string, token: string): string {
 	const lines = screen.split("\n");
@@ -77,15 +111,19 @@ export function sliceOutput(screen: string, token: string): string {
 
 /**
  * Opens the pane below pi, focuses it, and starts the wrapper. With an `answerId` (an accepted answer from another
- * extension), the new pane is marked `sb_answer=<answerId>` first, so Straw Boss can tell it is the pane this answer opened.
+ * extension), the new pane is marked `sb_answer=<answerId>` first, so Straw Boss can tell it is the pane this answer opened,
+ * and the command runs in a fixed environment under bash (see `fixedEnvLine`): no person chose it, so nothing from the
+ * user's shell setup may run with it.
  */
 export async function startRun(exec: Exec, opts: { piPane: string; cwd: string; tmp: string; command: string; type: boolean; shell: "zsh" | "bash"; answerId?: string }): Promise<HerdrRun> {
 	const token = randomBytes(4).toString("hex");
 	const dir = join(opts.tmp, "pi-robot-hand", token);
 	await mkdir(dir, { recursive: true, mode: 0o700 });
 	await writeFile(join(dir, "command"), opts.command, { mode: 0o600 });
-	const script = join(dir, `run.${opts.shell}`);
-	await writeFile(script, wrapperScript(opts.shell, dir, token, opts.type), { mode: 0o600 });
+	const fixed = Boolean(opts.answerId);
+	const shell = fixed ? "bash" : opts.shell;
+	const script = join(dir, `run.${shell}`);
+	await writeFile(script, wrapperScript(shell, dir, token, opts.type), { mode: 0o600 });
 	await chmod(dir, 0o700);
 
 	const split = await exec(["pane", "split", "--pane", opts.piPane, "--direction", "down", "--ratio", "0.4", "--cwd", opts.cwd]);
@@ -97,7 +135,7 @@ export async function startRun(exec: Exec, opts: { piPane: string; cwd: string; 
 	// Best effort and once: if the tag fails Straw Boss grants no pane, and the command still runs.
 	if (opts.answerId) await exec(["pane", "report-metadata", paneId, "--source", "robot-hand", "--token", `sb_answer=${opts.answerId}`, "--ttl-ms", "600000"]).catch(() => undefined);
 	await exec(["pane", "focus", "--pane", opts.piPane, "--direction", "down"]);
-	const run = await exec(["pane", "run", paneId, `${opts.shell} ${shellQuote(script)}`]);
+	const run = await exec(["pane", "run", paneId, fixed ? fixedEnvLine(script) : `${shell} ${shellQuote(script)}`]);
 	if (run.code !== 0) {
 		await exec(["pane", "close", paneId]);
 		await rm(dir, { recursive: true, force: true });
