@@ -101,9 +101,9 @@ export function dialogTitle(offer: Offer, reason: string): string {
 	return `Robot Hand — ${reason}\n\n  ${promptText(offer).split("\n").join("\n  ")}`;
 }
 
-/** What the tool tells the agent when another extension cancelled the dialog: not the user's decision. */
+/** What the tool tells the agent when another extension cancelled the dialog. It says what happened and nothing about asking again: the host that sent the cancel (sb's page or auto mode) adds what the cancel means (RC-F001). */
 export const REMOTE_CANCEL_TEXT =
-	"The dialog was cancelled from another device or by auto mode, not by the user at the terminal; nothing was placed or run. This is not a refusal: the user has not decided. Do not ask again or wait for them now.";
+	"The dialog was cancelled from another device or by auto mode, outside this terminal; nothing was placed or run.";
 
 /** What the tool tells the agent after the user chose. */
 export function resultText(choice: Choice, offer: Offer): string {

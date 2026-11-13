@@ -355,6 +355,8 @@ test("a remote cancel closes with cancel and its answerId, ends the selector, ru
 	assert.deepEqual(run.herdr, []);
 	assert.match(cancelText(result), /cancelled from another device or by auto mode/);
 	assert.match(cancelText(result), /nothing was placed or run/);
+	// RC-F001: no instruction on asking again; the host (sb's declined note, its auto-mode text) says what a cancel means.
+	assert.doesNotMatch(cancelText(result), /not a refusal|has not decided|ask again|Do not ask/i);
 	assert.notEqual(text(result), resultText("cancel", toOffer("sudo apt upgrade", "shell")));
 	assert.deepEqual(result.details, { command: "! sudo apt upgrade", status: "cancel", cancelledFrom: "remote" });
 	assert.equal(result.terminate, false, "the agent answers");

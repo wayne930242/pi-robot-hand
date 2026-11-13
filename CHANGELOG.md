@@ -2,6 +2,8 @@
 
 ## 0.8.0
 
+- The remote-cancel text says only what happened (cancelled outside this terminal, nothing placed or run); what a cancel means is the sending host's to say (sb's review RC-F001).
+
 - `robot_hand`: another extension can cancel the open dialog with `robot-hand:answer` `{ version: 1, id, answerId, cancel: true }`, optionally with the dialog's `digest` (no choice, no other key). The dialog closes without placing or running anything, `answer-result` is `accepted: true`, and `robot-hand:closed` is `{ version: 1, id, by: "cancel", answerId }`. The tool returns a result that says the dialog was cancelled from another device or by auto mode, not by the user (`details: { status: "cancel", cancelledFrom: "remote" }`); the agent's turn is not aborted. A cancel for a dialog that already closed gets `accepted: false, reason: "closed"`; one that carries a digest other than the dialog's is refused as `digest`; one that carries a choice or any other key is refused as `malformed`; in both cases the dialog stays open.
 - A remote cancel is told from a local Escape by its `answerId`: Escape (and "No, thanks" and "Report the mismatch and refuse") still closes with `by: "cancel"` and no `answerId`, and returns the plain declined text.
 - `robot-hand:pending` carries `cancellable: true`, so an answerer knows this version takes a cancel. pi-straw-boss reads it from its auto-mode release (task 6 of its auto-mode spec), which sends the cancel with the dialog's digest; older sb versions never cancel.
