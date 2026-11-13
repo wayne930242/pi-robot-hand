@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 
-- `robot_hand`: another extension can cancel the open dialog with `robot-hand:answer` `{ version: 1, id, answerId, cancel: true }` (no digest, no choice, no other key). The dialog closes without placing or running anything, `answer-result` is `accepted: true`, and `robot-hand:closed` is `{ version: 1, id, by: "cancel", answerId }`. The tool returns a result that says the dialog was cancelled from another device or by auto mode, not by the user (`details: { status: "cancel", cancelledFrom: "remote" }`); the agent's turn is not aborted. A cancel for a dialog that already closed gets `accepted: false, reason: "closed"`; one that carries a choice, a digest, or any other key is refused as `malformed` and the dialog stays open.
+- `robot_hand`: another extension can cancel the open dialog with `robot-hand:answer` `{ version: 1, id, answerId, cancel: true }`, optionally with the dialog's `digest` (no choice, no other key). The dialog closes without placing or running anything, `answer-result` is `accepted: true`, and `robot-hand:closed` is `{ version: 1, id, by: "cancel", answerId }`. The tool returns a result that says the dialog was cancelled from another device or by auto mode, not by the user (`details: { status: "cancel", cancelledFrom: "remote" }`); the agent's turn is not aborted. A cancel for a dialog that already closed gets `accepted: false, reason: "closed"`; one that carries a digest other than the dialog's is refused as `digest`; one that carries a choice or any other key is refused as `malformed`; in both cases the dialog stays open.
 - A remote cancel is told from a local Escape by its `answerId`: Escape (and "No, thanks" and "Report the mismatch and refuse") still closes with `by: "cancel"` and no `answerId`, and returns the plain declined text.
-- `robot-hand:pending` carries `cancellable: true`, so an answerer knows this version takes a cancel.
+- `robot-hand:pending` carries `cancellable: true`, so an answerer knows this version takes a cancel. pi-straw-boss reads it from its auto-mode release (task 6 of its auto-mode spec), which sends the cancel with the dialog's digest; older sb versions never cancel.
+- `secret_drop` takes no remote cancel: it has no bus relay (the relay was withdrawn), so its masked dialog ends only on the user's input, Escape, or the tool's abort signal, and it publishes no `pending` event.
 
 ## 0.7.2
 

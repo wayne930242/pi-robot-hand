@@ -401,15 +401,39 @@ test("after a remote cancel, a choice or a second cancel is refused as closed", 
 	assert.equal(run.bus.of("robot-hand:closed").length, 1);
 });
 
-test("a cancel with a choice, a digest, or anything else is refused whole as malformed and the dialog stays open", async () => {
+test("a cancel carrying the dialog's own digest is accepted like one without", async () => {
+	const turn = new AbortController();
+	const run = start(PARAMS, { signal: turn.signal });
+	const { id, digest } = run.pending();
+	run.bus.emit("robot-hand:answer", { version: 1, id, answerId: GOOD, digest, cancel: true });
+	assert.deepEqual(run.bus.of("robot-hand:answer-result"), [{ version: 1, id, answerId: GOOD, accepted: true }]);
+	assert.deepEqual(run.bus.of("robot-hand:closed"), [{ version: 1, id, by: "cancel", answerId: GOOD }]);
+	const result = await run.done;
+	assert.equal(turn.signal.aborted, false);
+	assert.deepEqual(result.details, { command: "! sudo apt upgrade", status: "cancel", cancelledFrom: "remote" });
+});
+
+test("a cancel carrying a wrong digest is refused as digest and the dialog stays open", async () => {
+	const run = start(PARAMS);
+	const { id } = run.pending();
+	run.bus.emit("robot-hand:answer", { version: 1, id, answerId: GOOD, digest: "0".repeat(64), cancel: true });
+	run.bus.emit("robot-hand:answer", { version: 1, id, answerId: GOOD, digest: 7, cancel: true });
+	assert.deepEqual(run.bus.of("robot-hand:answer-result").map((r) => [r.accepted, r.reason]), [[false, "digest"], [false, "digest"]]);
+	assert.deepEqual(run.bus.of("robot-hand:closed"), []);
+	run.answer({ selections: [run.indexOf(/prompt/)] });
+	await run.done;
+	assert.equal(run.state.editor, "! sudo apt upgrade");
+});
+
+test("a cancel with a choice, words, or anything else is refused whole as malformed and the dialog stays open", async () => {
 	const run = start(PARAMS);
 	const { id, digest } = run.pending();
 	const base = { version: 1, id, answerId: GOOD, cancel: true };
 	const refused: Record<string, unknown>[] = [
 		{ ...base, selections: [0] },
+		{ ...base, digest, selections: [0] },
 		{ ...base, text: "no" },
 		{ ...base, comment: "no" },
-		{ ...base, digest },
 		{ ...base, extra: true },
 		{ ...base, cancel: false },
 		{ ...base, cancel: "true" },

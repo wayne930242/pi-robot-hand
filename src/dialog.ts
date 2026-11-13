@@ -15,8 +15,8 @@ type Reason = "closed" | "digest" | "malformed" | "not-allowed";
 const PREFIX = "robot-hand";
 const ANSWER_ID = /^[A-Za-z0-9_-]{16,64}$/;
 const KEYS = new Set(["version", "id", "answerId", "digest", "selections", "text", "comment"]);
-// A cancel is `{version, id, answerId, cancel: true}` and nothing else: no digest, no choice, no words.
-const CANCEL_KEYS = new Set(["version", "id", "answerId", "cancel"]);
+// A cancel is `{version, id, answerId, cancel: true}`, optionally with the dialog's digest, and nothing else: no choice, no words.
+const CANCEL_KEYS = new Set(["version", "id", "answerId", "digest", "cancel"]);
 
 /** SHA-256 of the canonical select form: the title and the choice labels, nothing else. */
 export function digestOf(title: string, labels: string[]): string {
@@ -27,9 +27,12 @@ function isCancel(a: Record<string, unknown>): boolean {
 	return Object.hasOwn(a, "cancel");
 }
 
-// A cancel is shaped or it is refused whole; there is no digest to check, so it ends the dialog whatever the dialog shows.
-function cancelShaped(a: Record<string, unknown>): boolean {
-	return a.version === 1 && typeof a.answerId === "string" && ANSWER_ID.test(a.answerId) && a.cancel === true && Object.keys(a).every((key) => CANCEL_KEYS.has(key));
+// A cancel is shaped or it is refused whole. Its digest is optional (it ends the dialog whatever the dialog shows),
+// but a digest that is present must be this dialog's.
+function cancelCheck(a: Record<string, unknown>, digest: string): Reason | undefined {
+	if (!(a.version === 1 && typeof a.answerId === "string" && ANSWER_ID.test(a.answerId) && a.cancel === true && Object.keys(a).every((key) => CANCEL_KEYS.has(key)))) return "malformed";
+	if (Object.hasOwn(a, "digest") && a.digest !== digest) return "digest";
+	return undefined;
 }
 
 // A selector takes exactly one index: no words, no comment. Returns that index, or why the whole answer is refused.
@@ -72,7 +75,7 @@ export function openDialog(bus: Bus, o: { toolCallId: string; title: string; cho
 		const answerId = typeof a.answerId === "string" && ANSWER_ID.test(a.answerId) ? a.answerId : "";
 		const result = (accepted: boolean, reason?: Reason): void => bus.emit(`${PREFIX}:answer-result`, { version: 1, id, answerId, accepted, ...(reason ? { reason } : {}) });
 		if (isCancel(a)) {
-			const refused = by ? "closed" : cancelShaped(a) ? undefined : "malformed";
+			const refused = by ? "closed" : cancelCheck(a, digest);
 			if (refused) return result(false, refused);
 			// Ends the selector like Escape does, but the closed event carries the answerId: that is how a remote cancel
 			// is told from a local Escape. The tool call goes on and returns; nothing aborts the turn.
