@@ -151,7 +151,26 @@ export function createRobotHand(
 		// Providers whose check failed in this session, with the note the picker shows.
 		const failedProviders = new Map<string, string>();
 
+		// A pi slash command placed in the prompt (such as /reload) runs only while pi is idle: from then until
+		// the run ends, other tool calls are blocked and the run stops after the current turn.
+		let holdForPrompt = false;
+		pi.on("tool_call", (event) => {
+			if (!holdForPrompt || event.toolName === "robot_hand") return;
+			return {
+				block: true,
+				reason: "A pi command waits in the user's prompt and runs only while pi is idle. Stop here and end your turn.",
+				terminate: true,
+			};
+		});
+		pi.on("turn_end", (_event, ctx) => {
+			if (holdForPrompt) ctx.abort();
+		});
+		pi.on("agent_end", () => {
+			holdForPrompt = false;
+		});
+
 		pi.on("session_shutdown", () => {
+			holdForPrompt = false;
 			failedProviders.clear();
 			if (timer) clearInterval(timer);
 			timer = undefined;
@@ -301,6 +320,7 @@ export function createRobotHand(
 
 					if (choice === "prompt") {
 						ctx.ui.setEditorText(text);
+						if (params.kind === "pi") holdForPrompt = true;
 						ctx.ui.notify("Review the command in your prompt and press Enter to run it.", "info");
 					} else if (choice === "clipboard") {
 						await copy(offer.command);
