@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1
+
+- `robot_hand` with `kind: "pi"`: after the user puts the command in the prompt (`/reload` and other pi commands run only while pi is idle), the agent's run stops at the end of the current turn, and any other tool call until then is blocked and told to end the turn. Before, `terminate` stopped the run only when every tool in the batch also terminated, so a parallel tool call kept the agent working and `/reload` could not run. The hold ends with the run.
+
 ## 0.8.0
 
 - The remote-cancel text says only what happened (cancelled outside this terminal, nothing placed or run); what a cancel means is the sending host's to say (sb's review RC-F001).
